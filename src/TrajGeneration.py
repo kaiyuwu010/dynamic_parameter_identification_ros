@@ -297,11 +297,9 @@ class TrajGeneration(Node):
                 a_eq2[i] = a_eq2[i] + a[l,i]*(l+1)
                 wl = ((l+1) * Ff* math.pi* 2.0) 
                 # 各谐波位置幅值之和，是整个周期位置偏移的保守上界
-                ab_sq_ineq1[i] = (ab_sq_ineq1[i]+ 
-                1.0/(wl)* cs.sqrt(a[l,i]*a[l,i] + b[l,i]*b[l,i]))
+                ab_sq_ineq1[i] = (ab_sq_ineq1[i] + 1.0/(wl) * cs.sqrt(a[l,i] * a[l,i] + b[l,i] * b[l,i]))
                 # 各谐波速度幅值之和，是整个周期速度幅值的保守上界
-                ab_sq_ineq2[i] = (ab_sq_ineq2[i]+ 
-                cs.sqrt(a[l,i]*a[l,i] + b[l,i]*b[l,i]))
+                ab_sq_ineq2[i] = (ab_sq_ineq2[i] + cs.sqrt(a[l,i]*a[l,i] + b[l,i]*b[l,i]))
                 ab_sq_ineq3.append(a[l,i])
                 ab_sq_ineq3.append(b[l,i])
                 # 单独限制每个a/b系数
@@ -415,7 +413,7 @@ class TrajGeneration(Node):
 
         前三组的上下界都为 0，因此是等式约束；后三组为区间约束。
         """
-        # 每个数组保存 7 个关节各自的符号约束表达式。
+        # 每个数组保存7个关节各自的符号约束表达式
         a_eq1 = [0.0]*7
         a_eq2 = [0.0]*7
         b_eq1 = [0.0]*7
@@ -423,7 +421,7 @@ class TrajGeneration(Node):
         ab_sq_ineq2 = [0.0]*7
         ab_sq_ineq3 = []
 
-        # lbg*/ubg* 与上述表达式分组一一对应，最后按相同顺序拼接。
+        # lbg*/ubg*与上述表达式分组一一对应，最后按相同顺序拼接。
         lbg1 = []
         lbg2 = []
         lbg3 = []
@@ -440,44 +438,37 @@ class TrajGeneration(Node):
         # 外层遍历关节，内层遍历5个Fourier谐波。
         for i in range(7):
             for l in range(5):
-                # 这三个和式在周期边界处被强制为 0。
+                # 这三个和式在周期边界处被强制为0
                 a_eq1[i] = a_eq1[i] + a[l,i]/(l+1)
                 b_eq1[i] = b_eq1[i] + b[l,i]
                 a_eq2[i] = a_eq2[i] + a[l,i]*(l+1)
-
                 wl = ((l+1) * Ff* math.pi* 2.0) 
-                # sqrt(a^2+b^2)/w 是该阶谐波的位置振幅。
-                ab_sq_ineq1[i] = (ab_sq_ineq1[i]+ 
-                1.0/(wl)* cs.sqrt(a[l,i]*a[l,i] + b[l,i]*b[l,i]))
-
+                # sqrt(a^2+b^2)/w 是该阶谐波的位置振幅
+                ab_sq_ineq1[i] = (ab_sq_ineq1[i] + 1.0/(wl)* cs.sqrt(a[l,i]*a[l,i] + b[l,i]*b[l,i]))
                 # q 对时间求导后 1/w 被抵消，sqrt(a^2+b^2) 是速度振幅。
                 ab_sq_ineq2[i] = (ab_sq_ineq2[i]+ 
                 cs.sqrt(a[l,i]*a[l,i] + b[l,i]*b[l,i]))
-
                 ab_sq_ineq3.append(a[l,i])
                 ab_sq_ineq3.append(b[l,i])
-
-                # 单系数边界取位置诱导界和速度界中更严格的一项。
+                # 单系数边界取位置诱导界和速度界中更严格的一项
                 cpr2 = min((l+1)*Ff/5.0*2.0*math.pi*q_max[i],q_vmax[i])
                 cpr = max((l+1)*Ff/5.0*2.0*math.pi*q_min[i],q_vmin[i])
                 lbg6.append(cpr)
                 lbg6.append(cpr)
                 ubg6.append(cpr2)
                 ubg6.append(cpr2)
-
-            # 前三组上下界相等，所以 IPOPT 将其视为等式约束。
+            # 前三组上下界相等，所以 IPOPT 将其视为等式约束
             lbg1.append(0.0)
             lbg2.append(0.0)
             lbg3.append(0.0)
             lbg4.append(0.0)
             lbg5.append(0.0)
-
             ubg1.append(0.0)
             ubg2.append(0.0)
             ubg3.append(0.0)
             ubg4.append(Ff* math.pi* 2.0  *q_max[i])
             ubg5.append(q_vmax[i])
-        # CasADi NLP 只接受一个 g，表达式和上下界必须保持完全相同的顺序。
+        # CasADi NLP只接受一个g，表达式和上下界必须保持完全相同的顺序
         g = cs.vertcat(*(a_eq1+  a_eq2+  b_eq1+  ab_sq_ineq1+ ab_sq_ineq2 + ab_sq_ineq3 ))
         lbg = cs.vertcat(*(lbg1,lbg2,lbg3,lbg4,lbg5,lbg6))
         ubg = cs.vertcat(*(ubg1,ubg2,ubg3,ubg4,ubg5,ubg6))
@@ -634,7 +625,7 @@ class TrajGeneration(Node):
     
     def generate_opt_traj(self,Ff, sampling_rate, Rank=5, q_min=-1.0*np.ones(7), q_max =3.0*np.ones(7), q_vmin=-5.0*np.ones(7),q_vmax=5.0*np.ones(7), f_path = None, g_path=None):
         """旧版激励轨迹优化实现；功能已由拆分后的优化接口覆盖。"""
-        Pb, Pd, Kd =find_dyn_parm_deps(7,80,self.Ymat)
+        Pb, Pd, Kd = find_dyn_parm_deps(7, 80, self.Ymat)
         K = Pb.T +Kd @Pd.T
         # sampling_rate = 0.1
         pointsNum = int(sampling_rate/(Ff))
@@ -812,7 +803,7 @@ class TrajGeneration(Node):
         return x_split1.full(),x_split2.full(),fc
 
     # 将Fourier系数采样为CSV文件
-    def generateToCsv(self, a, b,Ff, sampling_rate,path=None,scale=1.0):
+    def generateToCsv(self, a, b, Ff, sampling_rate, path=None, scale=1.0):
         assert a.shape == b.shape
         if path is None:
             path1 = "/tmp/target_joint_states.csv"

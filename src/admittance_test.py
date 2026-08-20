@@ -33,9 +33,7 @@ class AdmittanceController(object):
         self.lbr_command_ = LBRCommand()
 
         robot = optas.RobotModel(xacro_filename=robot_description)
-        J = robot.get_geometric_jacobian_function(
-            end_effector_link, base_link, numpy_output=True
-        )
+        J = robot.get_geometric_jacobian_function(end_effector_link, base_link, numpy_output=True)
         self.jacobian_func_ = lambda q: J(q)
 
         self.dof_ = robot.ndof
@@ -66,11 +64,7 @@ class AdmittanceController(object):
         self.Pb = Pb
         self.K = K
 
-        path_pos = os.path.join(
-            get_package_share_directory("gravity_compensation"),
-            "test",
-            "DynamicParameters.csv",
-        )
+        path_pos = os.path.join(get_package_share_directory("gravity_compensation"), "test", "DynamicParameters.csv",)
         self.params = ExtractFromParamsCsv(path_pos)
         self.pa_size = Pb.shape[1]
         self._is_init = False
@@ -80,69 +74,30 @@ class AdmittanceController(object):
     def __call__(self, lbr_state: LBRState) -> LBRCommand:
         self.q_ = np.array(lbr_state.measured_joint_position.tolist())
         self.tau_ext_raw = np.array(lbr_state.measured_torque.tolist())
-
-        # print("lbr_state.measured_joint_position.tolist()", len(lbr_state.measured_joint_position.tolist()))
-
         if not self._is_init:
             self.q_last = copy.deepcopy(self.q_)
-            # c = 
             self._is_init = True
-
-            self.lbr_command_.joint_position = (
-                np.array(lbr_state.measured_joint_position.tolist())
-            ).data
-
+            self.lbr_command_.joint_position = (np.array(lbr_state.measured_joint_position.tolist())).data
             return self.lbr_command_
 
         q = copy.deepcopy(self.q_)
         self.qd = (self.q_-self.q_last)/0.01
         qdd = (self.qd-self.qd_last)/0.01
 
-        self.tau_model = (self.Ymat(q.tolist(),
-                        self.qd.tolist(),
-                        qdd.tolist())@self.Pb @  self.params[:self.pa_size] + 
-                np.diag(np.sign(self.qd)) @ self.params[self.pa_size:self.pa_size+7]+ 
-                np.diag(self.qd) @ self.params[self.pa_size+7:]).toarray().flatten()
+        self.tau_model = (self.Ymat(q.tolist(), self.qd.tolist(), qdd.tolist())@self.Pb @  self.params[:self.pa_size] + 
+                np.diag(np.sign(self.qd)) @ self.params[self.pa_size:self.pa_size+7] + np.diag(self.qd) @ self.params[self.pa_size+7:]).toarray().flatten()
+        self.tau_model = np.where(abs(self.tau_model) < self.tau_model_th_, self.tau_model, np.sign(self.tau_model)*self.tau_model_th_,)
         
-
-        self.tau_model = np.where(
-            abs(self.tau_model) < self.tau_model_th_,
-            self.tau_model,
-            np.sign(self.tau_model)*self.tau_model_th_,
-        )
-        
-
         self.jacobian_ = self.jacobian_func_(self.q_)
-
         self.jacobian_inv_ = np.linalg.pinv(self.jacobian_, rcond=0.05)
         self.tau_ext_ = self.tau_ext_raw - self.tau_model  #.toarray().flatten()
-
-
         self.f_ext_ = self.jacobian_inv_.T @ self.tau_ext_
-
-        # print("self.f_ext_ = ",self.f_ext_)
         print("tau_ext_", self.tau_ext_)
-
-        self.f_ext_ = np.where(
-            abs(self.f_ext_) > self.f_ext_th_,
-            self.dx_gain_ @ np.sign(self.f_ext_) * (abs(self.f_ext_) - self.f_ext_th_),
-            0.0,
-        )
-
+        self.f_ext_ = np.where(abs(self.f_ext_) > self.f_ext_th_, self.dx_gain_ @ np.sign(self.f_ext_) * (abs(self.f_ext_) - self.f_ext_th_), 0.0,)
         print("f_ext_", self.f_ext_)
-        
-        self.dq_ = (
-            self.alpha_ * self.dq_
-            + (1 - self.alpha_) * self.dq_gain_ @ self.jacobian_inv_ @ self.f_ext_
-        )
-
-        self.lbr_command_.joint_position = (
-            np.array(lbr_state.measured_joint_position.tolist())
-            + lbr_state.sample_time * self.dq_
-        ).data
-
+        self.dq_ = (self.alpha_ * self.dq_ + (1 - self.alpha_) * self.dq_gain_ @ self.jacobian_inv_ @ self.f_ext_)
+        self.lbr_command_.joint_position = (np.array(lbr_state.measured_joint_position.tolist()) + lbr_state.sample_time * self.dq_).data
         data_record = np.array(self.tau_model.tolist()+self.dq_.tolist() +self.q_.tolist())
-
         """ 
         The users could uncomment the lines to record data in your PC.
         """
@@ -151,65 +106,31 @@ class AdmittanceController(object):
         # csv_save("/home/thy/ros2_ws/command.csv", self.dq_)
         self.qd_last = copy.deepcopy(self.qd)
         self.q_last = copy.deepcopy(self.q_)
-
         return self.lbr_command_
-
 
 
 class AdmittanceControlNode(Node):
     def __init__(self, node_name="admittance_control_node") -> None:
         super().__init__(node_name=node_name)
-
-        path = os.path.join(
-            get_package_share_directory("med7_dock_description"),
-            "urdf",
-            "med7dock.urdf.xacro",
-        )
+        path = os.path.join(get_package_share_directory("med7_dock_description"), "urdf", "med7dock.urdf.xacro",)
         print("path = ",path)
-
         # parameters
         self.declare_parameter("robot_description", path)
         self.declare_parameter("base_link", "lbr_link_0")
         self.declare_parameter("end_effector_link", "lbr_link_ee")
-
         self.init_ = False
         self.lbr_state_ = None
-
-        self.controller_ = AdmittanceController(
-            robot_description=path,
-            base_link=str(self.get_parameter("base_link").value),
-            end_effector_link=str(self.get_parameter("end_effector_link").value),
-        )
-
-
-
+        self.controller_ = AdmittanceController(robot_description=path, base_link=str(self.get_parameter("base_link").value), end_effector_link=str(self.get_parameter("end_effector_link").value),)
         # publishers and subscribers
         # cb_group = ReentrantCallbackGroup()
         self.lbr_state_sub_ = self.create_subscription(
-            LBRState, "/lbr/state", self.on_lbr_state_,
-            QoSProfile(
-                depth=1,
-                reliability=ReliabilityPolicy.RELIABLE,
-                deadline=Duration(nanoseconds=10 * 1e6),  # 10 milliseconds
-            ),
-        )
+            LBRState, "/lbr/state", self.on_lbr_state_, QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, deadline=Duration(nanoseconds=10 * 1e6), ),)
         self.lbr_command_pub_ = self.create_publisher(
-            LBRCommand,
-            "/lbr/command",
-            QoSProfile(
-                depth=1,
-                reliability=ReliabilityPolicy.RELIABLE,
-                deadline=Duration(nanoseconds=10 * 1e6),  # 10 milliseconds
-            ),
-        )
+            LBRCommand, "/lbr/command", QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, deadline=Duration(nanoseconds=10 * 1e6), ),)
 
     def on_lbr_state_(self, lbr_state: LBRState) -> None:
         self.smooth_lbr_state_(lbr_state, 0.95)
-        # print("self.lbr_state_ = ",lbr_state.measured_joint_position.tolist())
-
         lbr_command = self.controller_(self.lbr_state_)
-        # lbr_command = LBRCommand()
-        
         self.lbr_command_pub_.publish(lbr_command)
 
     def smooth_lbr_state_(self, lbr_state: LBRState, alpha: float):
@@ -220,25 +141,9 @@ class AdmittanceControlNode(Node):
             self.init_ = True
             return
 
-        self.lbr_state_.measured_joint_position = (
-            (1.0 - alpha) * np.array(self.lbr_state_.measured_joint_position.tolist())
-            + alpha * np.array(lbr_state.measured_joint_position.tolist())
-        ).data
-
-        self.lbr_state_.external_torque = (
-            (1.0 - alpha) * np.array(self.lbr_state_.external_torque.tolist())
-            + alpha * np.array(lbr_state.external_torque.tolist())
-        ).data
-
-        self.lbr_state_.measured_torque = (
-            (1.0 - alpha) * np.array(self.lbr_state_.measured_torque.tolist())
-            + alpha * np.array(lbr_state.measured_torque.tolist())
-        ).data
-
-        # print("self.lbr_state_.measured_joint_position",self.lbr_state_.measured_joint_position)
-
-
-
+        self.lbr_state_.measured_joint_position = ((1.0 - alpha) * np.array(self.lbr_state_.measured_joint_position.tolist()) + alpha * np.array(lbr_state.measured_joint_position.tolist())).data
+        self.lbr_state_.external_torque = ((1.0 - alpha) * np.array(self.lbr_state_.external_torque.tolist()) + alpha * np.array(lbr_state.external_torque.tolist())).data
+        self.lbr_state_.measured_torque = ((1.0 - alpha) * np.array(self.lbr_state_.measured_torque.tolist()) + alpha * np.array(lbr_state.measured_torque.tolist())).data
 
 def main(args=None):
     rclpy.init(args=args)

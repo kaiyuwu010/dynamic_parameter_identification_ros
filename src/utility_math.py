@@ -72,10 +72,7 @@ def quaternion_multiply(q1, q2):
     x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
     y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
     z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
-
     # s = w*w + x*x+y*y+z*z
-
-
     return np.array([w, x, y, z])
 
 def quaternion_conjugate(q):
@@ -88,9 +85,6 @@ def quaternion_normalize(q):
     if norm == 0.0:
         raise ValueError("cannot normalize a zero quaternion")
     return q / norm
-
-
-
 
 def csv_save(path, vector):
     if not os.path.exists(path):
@@ -125,7 +119,6 @@ def state2Msg(p,q):
 def Msg2state(msg):
     p = np.array([0.0]*3)
     q = np.array([0.0]*4)
-
 
     p[0] = msg.position.x
     p[1] = msg.position.y
@@ -169,14 +162,13 @@ def from_pose2T44(pose):
 
 def from_T442pq(T44):
     R = T44[:3,:3]
-
     q = rotation_matrix_to_quaternion(R)
     p = np.array([0.0]*3)
     p[0] = T44[0,3]
     p[1] = T44[1,3]
     p[2] = T44[2,3]
-    
     return p,q
+
 def from_T442pose(T44):
     p,q = from_T442pq(T44)
     pose = np.array([0.0]*7)
