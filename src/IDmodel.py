@@ -85,9 +85,9 @@ def ExtractFromParamsCsv(path):
         return params
 
 # 递归牛顿欧拉算法。Nb: 关节数  Nk: 额外末端固定结构数量(基本为1) 
-# rpys[i]: 连杆i的坐标系相对连杆i-1的坐标系的变换，连杆0是第一个连杆不是root，大小为NfX3
-# xyzs[i]: 连杆i的原点相对连杆i-1的原点的平移，连杆0是第一个连杆不是root，大小为NfX3
-# axes[i]: 连杆i的旋转轴，连杆0是第一个连杆不是root，大小为NfX3
+# rpys[i]: 连杆i的坐标系相对连杆i-1的坐标系的变换，连杆0是第一个连杆不是root，大小为NfX3，(0、...、Nf-1)，包括末端刚体相对最后连杆的旋转矩阵
+# xyzs[i]: 连杆i的原点相对连杆i-1的原点的平移，连杆0是第一个连杆不是root，大小为NfX3，(0、...、Nf-1)，包括末端刚体相对最后连杆的坐标系平移
+# axes[i]: 连杆i的旋转轴，连杆0是第一个连杆不是root，大小为NfX3，(0、...、Nf-1)，包括末端刚体相对最后连杆的连接轴
 # gravity_para: 基坐标系下的重力加速度
 def RNEA_function(Nb, Nk, rpys, xyzs, axes, gravity_para = cs.DM([4.905, 0.0, -8.496])):
     Nf = Nb+Nk
@@ -130,7 +130,7 @@ def RNEA_function(Nb, Nk, rpys, xyzs, axes, gravity_para = cs.DM([4.905, 0.0, -8
         fi = m[i] * (vDi + skew(omDi) @ cm[:,i] + skew(omi) @ (skew(omi) @ cm[:,i]))
         # 计算连杆i的合力矩: 当前连杆的惯性矩阵 X 当前连杆的角加速度 + 陀螺力矩
         ni = Icm[:, i*3: i*3+3] @ omDi + skew(omi) @ Icm[: ,i*3: i*3+3] @ omi 
-        # 保存到列表，矩阵大小为3X(Nf+1)，(基座、连杆1...连杆Nb、末端刚体)
+        # 保存到列表，矩阵大小为3X(Nf+1)，(基座、连杆1...连杆Nb、末端刚体)，(0、...、Nf)
         oms.append(omi)
         omDs.append(omDi)
         vDs.append(vDi)
@@ -141,7 +141,7 @@ def RNEA_function(Nb, Nk, rpys, xyzs, axes, gravity_para = cs.DM([4.905, 0.0, -8
     # 把末端刚体关于质心的惯性力矩转换为关于坐标系原点的惯性力矩: 关于质心的惯性力矩 + 质心向量 X 惯性合力
     ini = ns[-1] + skew(cm[:,-1]) @ fs[-1]
     taus = []
-    for i in range(Nf-1, 0, -1): # Nf-1到1
+    for i in range(Nf-1, 0, -1): # Nf-1到1，遍历活动关节，不包括末端刚体与最后一个关节的连接
         if(i < Nf-1):
             # 计算i相对i-1的旋转矩阵
             pRi = rpy2r(rpys[i]) @ angvec2r(q[i], axes[i])
