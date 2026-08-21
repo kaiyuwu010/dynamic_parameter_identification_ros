@@ -46,25 +46,30 @@ def scaled_least_squares(regressor, target, *, weights=None, rcond=None):
     solution = solution / scale.reshape((-1,) + (1,) * (solution.ndim - 1))
     return solution, residuals, rank, singular_values
 
-# 提取基本动力学参数，通过QR分解的列主元法。(从完整惯性参数中分离可独立辨识列Pb和相关列Pd)
+# 从完整惯性参数中分离可独立辨识列Pb和相关列Pd
 def base_parameter_transform(observation_matrix, *, rtol=None):
-    """Compute a deterministic base-parameter column transform using pivoted QR."""
     Z = np.asarray(observation_matrix, dtype=float)
     if Z.ndim != 2:
         raise ValueError("observation_matrix must be two-dimensional")
+    # 进行QR分解:  "_"是正交矩阵Q  "R"是上三角矩阵  "pivots"是整数索引数组表示列置换顺序，列主元QR会优先选择较独立、信息量较大的列
     _, R, pivots = linalg.qr(Z, mode="economic", pivoting=True)
+    # 提取上三角矩阵R的对角线元素并取绝对值
     diagonal = np.abs(np.diag(R))
     if diagonal.size == 0:
         raise ValueError("observation_matrix must not be empty")
     if rtol is None:
         rtol = max(Z.shape) * np.finfo(float).eps
+    # 计算对角矩阵的秩
     rank = int(np.count_nonzero(diagonal > rtol * diagonal[0]))
     if rank == 0:
         raise ValueError("observation_matrix has zero numerical rank")
-
+    # 生成np格式的独立的列索引
     independent = np.asarray(pivots[:rank], dtype=int)
+    # 生成np格式的不独立的索引
     dependent = np.asarray(pivots[rank:], dtype=int)
+    # 把独立的列组成矩阵Pb
     Pb = np.eye(Z.shape[1])[:, independent]
+    # 不独立的组成矩阵Pd
     Pd = np.eye(Z.shape[1])[:, dependent]
     if dependent.size:
         Kd = linalg.solve_triangular(R[:rank, :rank], R[:rank, rank:])

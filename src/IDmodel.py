@@ -3,13 +3,13 @@ import numpy as np
 import optas
 from optas.spatialmath import *
 from optas.spatialmath import rpy2r, angvec2r, skew
+import casadi as cs
 
 from ament_index_python import get_package_share_directory
 import os
 import math
 import xacro
 import urdf_parser_py.urdf as urdf
-import casadi as cs
 from identification_numerics import base_parameter_transform
 
 def sign(x):
@@ -141,7 +141,7 @@ def RNEA_function(Nb, Nk, rpys, xyzs, axes, gravity_para = cs.DM([4.905, 0.0, -8
     # 把末端刚体关于质心的惯性力矩转换为关于坐标系原点的惯性力矩: 关于质心的惯性力矩 + 质心向量 X 惯性合力
     ini = ns[-1] + skew(cm[:,-1]) @ fs[-1]
     taus = []
-    for i in range(Nf-1, 0, -1): # Nf-1到1，遍历活动关节，不包括末端刚体与最后一个关节的连接
+    for i in range(Nf-1, 0, -1): # Nf-1到1，遍历活动关节求力矩，不包括末端刚体与最后一个关节的连接
         if(i < Nf-1):
             # 计算i相对i-1的旋转矩阵
             pRi = rpy2r(rpys[i]) @ angvec2r(q[i], axes[i])
@@ -150,7 +150,7 @@ def RNEA_function(Nb, Nk, rpys, xyzs, axes, gravity_para = cs.DM([4.905, 0.0, -8
             pRi = rpy2r(rpys[i])
         else:
             pRi = rpy2r(rpys[i])
-        # 计算关节i-1施加给关节i的力矩: 惯性合力矩 + 当前关节施加给上个关节的力矩 + 惯性合力对坐标系原点产生的力矩 + 上个关节的力产生的力矩
+        # 计算关节i-1施加给关节i的力矩: 惯性合力矩 + 关节i施加给关节i+1的力矩 + 惯性合力对坐标系原点产生的力矩 + 上个关节的力产生的力矩
         ini = ns[i] + pRi @ ini + skew(cm[:, i-1]) @ fs[i] + skew(xyzs[i]) @ pRi @ ifi
         # 计算关节i-1施加给关节i的力: 惯性合力 + 当前关节施加给上个关节的力
         ifi = fs[i] + pRi @ ifi
@@ -175,29 +175,29 @@ def DynamicLinearlization(dynamics_, Nb):
     Icm = cs.SX.sym('Icm', 3, 3*Nb+3)
     # 计算回归矩阵
     Y = []
-    for i in range(Nb): # 0到Nb-1
+    for i in range(Nb): # 0到Nb-1，遍历每个关节的力矩表达式，dynamics_函数求出的
         Y_line = []
-        for j in range(m.shape[1]): # 0到Nb
+        for j in range(m.shape[1]): # 0到Nb，遍历每个连杆包含末端刚体
             # 提取质量参数系数
-            m_indu = np.zeros([m.shape[1], m.shape[0]])   # Nb+1行，1列
-            cm_indu = np.zeros([3, Nb+1])                 # 3行，Nb+1列    
-            Icm_indu = np.zeros([3, 3*Nb+3])              # 3行，3(Nb+1)列      
-            m_indu[j] = 1.0                               # 只有第j行质量不为0，只保留第j行质量系数
-            output = dynamics_(q, qd, qdd, m_indu, cm_indu, Icm_indu)[i]
+            m_indu = np.zeros([m.shape[1], m.shape[0]])                     # Nb+1行，1列
+            cm_indu = np.zeros([3, Nb+1])                                   # 3行，Nb+1列    
+            Icm_indu = np.zeros([3, 3*Nb+3])                                # 3行，3(Nb+1)列      
+            m_indu[j] = 1.0                                                 # 只有第j行质量不为0，只保留第j行质量系数，表示第j个连杆的质量系数
+            output = dynamics_(q, qd, qdd, m_indu, cm_indu, Icm_indu)[i]    # 惯性系数只有第j个连杆的质量不为0且为1，所以output是第j个连杆的质量系数
             Y_line.append(output)
             # 提取质心系数
-            output1 = dynamics_(q, qd, qdd, m_indu, cm, Icm_indu)[i] - output # 只保留质心系数
+            output1 = dynamics_(q, qd, qdd, m_indu, cm, Icm_indu)[i] - output # 惯性系数只有第j个连杆的质量和所有连杆质心向量不为0，质心向量都和质量都是成对存在，所以output1是第j个连杆的质心项
             for k in range(3):
-                # 分别对三个质心变量cm[k,j]求雅可比矩阵
+                # 对第j个刚体的3个质心变量cm[k,j]求导，只保留质心系数
                 output_cm = optas.jacobian(output1, cm[k,j])
-                # 在符号表达式中进行变量替换，把cm替换成cm_indu
-                output_cm1 = optas.substitute(output_cm, cm, cm_indu)
+                # 在符号表达式中进行变量替换，把cm替换成cm_indu，清理掉质心二次项求导后剩余的符号变量，只保留一次项系数，二次项系数在下面的惯性参数pi_temp里表示
+                output_cm1 = optas.substitute(output_cm, cm, cm_indu) 
                 Y_line.append(output_cm1)
             # 提取惯性参数系数
-            output2 = dynamics_(q, qd, qdd, m_indu, cm_indu, Icm)[i] - output # 只保留惯性系数
+            output2 = dynamics_(q, qd, qdd, m_indu, cm_indu, Icm)[i] - output # 只保留惯性项
             for k in range(3): # 0到2
                 for l in range(k, 3, 1): # K到2
-                    # 分别对每个惯性参数求雅可比
+                    # 对第j个刚体的6个惯性参数求导，这里不包括二次项所以不用替换
                     output_Icm = optas.jacobian(output2, Icm[k, l + 3*j])
                     Y_line.append(output_Icm)
         # 水平拼接为一行
@@ -210,16 +210,16 @@ def DynamicLinearlization(dynamics_, Nb):
     PI_a = []
     for j in range(m.shape[1]):
         # 每个连杆10维的参数向量
-        pi_temp = [m[j],                                                          # 质量
-                    m[j] * cm[0,j],                                               # 质心向量x
-                    m[j] * cm[1,j],                                               # 质心向量y
-                    m[j] * cm[2,j],                                               # 质心向量z
-                    Icm[0, 0+3*j] + m[j] * (cm[1,j]*cm[1,j] + cm[2,j]*cm[2,j]),   # XXi
-                    Icm[0, 1+3*j] - m[j] * (cm[0,j]*cm[1,j]),                     # XYi
-                    Icm[0, 2+3*j] - m[j] * (cm[0,j]*cm[2,j]),                     # XZi
-                    Icm[1, 1+3*j] + m[j] * (cm[0,j]*cm[0,j] + cm[2,j]*cm[2,j]),   # YYi
-                    Icm[1, 2+3*j] - m[j] * (cm[1,j]*cm[2,j]),                     # YZi
-                    Icm[2, 2+3*j] + m[j] * (cm[0,j]*cm[0,j] + cm[1,j]*cm[1,j])]   # ZZi
+        pi_temp = [m[j],                                                         # 质量
+                   m[j] * cm[0,j],                                               # 质心向量x
+                   m[j] * cm[1,j],                                               # 质心向量y
+                   m[j] * cm[2,j],                                               # 质心向量z
+                   Icm[0, 0+3*j] + m[j] * (cm[1,j]*cm[1,j] + cm[2,j]*cm[2,j]),   # XXi
+                   Icm[0, 1+3*j] - m[j] * (cm[0,j]*cm[1,j]),                     # XYi
+                   Icm[0, 2+3*j] - m[j] * (cm[0,j]*cm[2,j]),                     # XZi
+                   Icm[1, 1+3*j] + m[j] * (cm[0,j]*cm[0,j] + cm[2,j]*cm[2,j]),   # YYi
+                   Icm[1, 2+3*j] - m[j] * (cm[1,j]*cm[2,j]),                     # YZi
+                   Icm[2, 2+3*j] + m[j] * (cm[0,j]*cm[0,j] + cm[1,j]*cm[1,j])]   # ZZi
         # 把pi_temp竖直拼接为一列
         PI_a.append(optas.vertcat(*pi_temp))
     # 将各列竖直拼接为一长列
@@ -292,17 +292,20 @@ def main():
     Nb, xyzs, rpys, axes = getJointParametersfromURDF(robot)
     dynamics_ = RNEA_function(Nb, 1, rpys, xyzs, axes)
     Ymat, PIvector = DynamicLinearlization(dynamics_, Nb)
-    Pb, Pd, Kd =find_dyn_parm_deps(7, 80, Ymat)
+    Pb, Pd, Kd = find_dyn_parm_deps(7, 80, Ymat)
     K = Pb.T + Kd @ Pd.T
     pa_size = Pb.shape[1]
+    # 生成轨迹
     q = np.array([1.0]*7)
     qd = np.array([0.0]*7)
     qdd = np.array([0.0]*7)
     filter = TD_list_filter(T = 0.01)
-    # parameters' path
+    # 加载动力学参数
     path_pos = os.path.join(get_package_share_directory("gravity_compensation"), "test", "DynamicParameters.csv", )
     params = ExtractFromParamsCsv(path_pos)
+    # 从urdf得到的惯性参数
     real_pam = PIvector(masses_np, massesCenter_np, Inertia_np)
+    # 估计力矩
     tau_est = (Ymat(q.tolist(), filter(qd.tolist())[0], filter(qd.tolist())[1]) @ Pb  @  params[:pa_size] + np.diag(np.sign(qd)) @ params[pa_size:pa_size+7] + np.diag(qdd) @ params[pa_size+7:])
     print(" The estimated torque  tau_est = {0}".format(tau_est))
 
