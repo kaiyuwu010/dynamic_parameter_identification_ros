@@ -79,17 +79,17 @@ class Estimator():
         self.dynamics_ = RNEA_function(Nb,1,rpys,xyzs,axes,gravity_para = cs.DM(gravity_vec))
         # 通过动态线性化方法获取动力学回归矩阵和参数向量
         self.Ymat, self.PIvector = DynamicLinearlization(self.dynamics_,Nb)
-
+        # 读取urdf
         urdf_string_ = xacro.process(path)
         robot = urdf.URDF.from_xml_string(urdf_string_)
-
-        masses = [link.inertial.mass for link in robot.links if link.inertial is not None]#+[1.0]
+        # 获取每个连杆的质量
+        masses = [link.inertial.mass for link in robot.links if link.inertial is not None]
         self.masses_np = np.array(masses[1:])
         # print("masses = {0}".format(self.masses_np))
-
+        # 获取每个连杆的质心向量
         massesCenter = [link.inertial.origin.xyz for link in robot.links if link.inertial is not None]#+[[0.0,0.0,0.0]]
         self.massesCenter_np = np.array(massesCenter[1:]).T
-        # Inertia = [np.mat(link.inertial.inertia.to_matrix()) for link in robot.links if link.inertial is not None]
+        # 获取每个连杆的惯性参数
         Inertia = [link.inertial.inertia.to_matrix() for link in robot.links if link.inertial is not None]
         self.Inertia_np = np.hstack(tuple(Inertia[1:]))
         
@@ -124,8 +124,6 @@ class Estimator():
         dt = 0.01
         pos_l = []
         tau_ext_l = []
-        # with open(path_pos) as csv_file:
-        #     csv_reader = csv.DictReader(csv_file)
         for row in pos_list:
             # print("111 = {0}".format(row.values()))
             pl = row[0:7]
@@ -135,12 +133,10 @@ class Estimator():
         vel_l, _ = differentiate_positions(pos_l, dt)
         return pos_l, vel_l.tolist(), tau_ext_l
 
-    def ExtractFromMeasurmentListZeroVel(self,pos_list):
+    def ExtractFromMeasurmentListZeroVel(self, pos_list):
         dt = 0.01
         pos_l = []
         tau_ext_l = []
-        # with open(path_pos) as csv_file:
-        #     csv_reader = csv.DictReader(csv_file)
         for row in pos_list:
             # print("111 = {0}".format(row.values()))
             pl = row[0:7]
@@ -150,7 +146,7 @@ class Estimator():
         vel_l =[]
         for id in range(len(pos_l)):
             vel_l.append([0.0, 0.0,0.0, 0.0,0.0, 0.0,0.0])
-        return pos_l,vel_l,tau_ext_l    
+        return pos_l, vel_l, tau_ext_l    
        
     # 保存
     def save_(self, csv_file, keys: List[str], values_list: List[List[float]]) -> None:

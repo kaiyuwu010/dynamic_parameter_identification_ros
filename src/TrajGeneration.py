@@ -116,7 +116,7 @@ def getConstraintsinJointSpace(robot, point_coord = [0.]*3, Nb=7, base_link="lin
     return p_fun 
 
 class FourierSeries():
-    # 保存Fourier系数的阶数Rank、关节数channel、偏置bias 和基频ff
+    # 保存Fourier系数的阶数Rank、关节数channel、偏置bias和基频ff
     def __init__(self, Rank = 5, channel = 7, bias=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], ff = 0.01) -> None:
         assert channel == len(bias), "Different size of Rank and bias!"
         # self.a = cs.SX.sym('a', Rank,channel)
@@ -395,7 +395,7 @@ class TrajGeneration(Node):
         else:
             print("Cannot finda a result!")
             raise ValueError("Try another setup")
-        return x_split1.full(), x_split2.full(),fc
+        return x_split1.full(), x_split2.full(), fc
     
     def get_ineq_Fourier_expression(self, Ff, a, b, q_min, q_max, q_vmin, q_vmax, ):
         """建立 Fourier 系数对应的周期边界及位置、速度幅值约束。
