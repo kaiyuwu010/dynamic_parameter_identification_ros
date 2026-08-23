@@ -235,7 +235,7 @@ def find_eigen_value(dof, parm_num, regressor_func, shape):
     for i in range(samples):
         a = np.random.random([parm_num, dof])*2.0 - 1.0
         b = np.random.random([parm_num, dof])*2.0 - 1.0
-        A_mat = A_mat + regressor_func(a,b)
+        A_mat = A_mat + regressor_func(a, b)
     U, s, V = np.linalg.svd(A_mat)
     return U, V
 

@@ -78,7 +78,8 @@ def load_from_csv(filename):
     return loaded_list
 
 # 在关节空间中建立避碰约束
-def getConstraintsinJointSpace(robot, point_coord = [0.]*3, Nb=7, base_link="link_3", base_joint_name="A3", ee_link="link_ee"):
+def getConstraintsinJointSpace(robot, point_coord = [0.]*3, Nb=7, base_link="link_3", base_joint_name="A3", 
+                               ee_link="link_ee"):
     # 定义符号关节变量
     q = cs.SX.sym('q', Nb, 1)
     # 计算正运动学获取末端位姿
@@ -87,7 +88,7 @@ def getConstraintsinJointSpace(robot, point_coord = [0.]*3, Nb=7, base_link="lin
     # 获取待避碰连杆位姿
     pb = robot.get_global_link_position(base_link, q)
     Rb = robot.get_global_link_rotation(base_link, q)
-    # 将末端凸包点变换到世界坐标系
+    # 将末端凸包点变换到基坐标系
     pp = pe + Re[:,0]*point_coord[0] + Re[:,1]*point_coord[1] + Re[:,2]*point_coord[2]
     # 获取待避碰连杆的关节原点作为椭球中心
     robot_urdf = robot.urdf
@@ -109,10 +110,10 @@ def getConstraintsinJointSpace(robot, point_coord = [0.]*3, Nb=7, base_link="lin
     # 椭球长轴和短轴
     a = 0.15
     b = 0.15
-    # E=0 是椭球表面; E>=0 表示点位于椭球外部
-    EpVF = x*x/(a*a) + y*y/(b*b) + (z-c)*(z-c)/(c*c)-1
+    # E=0 表示凸包点位于椭球表面; E>0 表示凸包点位于椭球外部
+    EpVF = x*x/(a*a) + y*y/(b*b) + (z-c)*(z-c)/(c*c) - 1
     # 将符号表达式封装为CasADi函数，便于优化器调用
-    p_fun = optas.Function('A_fun',[q],[EpVF])
+    p_fun = optas.Function('A_fun', [q], [EpVF])
     return p_fun 
 
 class FourierSeries():
@@ -130,15 +131,17 @@ class FourierSeries():
         q = copy.deepcopy(self.bias)
         for i in range(self.channel):
             for l in range(self.Rank):
-                wl = ((l+1) * self.ff* math.pi* 2.0) 
+                # 分别计算1、2、...5倍基频
+                wl = ((l+1) * self.ff * math.pi * 2.0) 
                 q[i] = q[i] + a[l,i]/wl * cs.sin(wl * t) - b[l,i]/wl * cs.cos(wl * t)
         return cs.Function(name, [a, b, t], q)
     # 根据给定的时间t, Fourier系数a、b, 计算关节位置的数值值, 不建立符号函数
-    def FourierValue(self, a,b,t):
+    def FourierValue(self, a, b, t):
         q = copy.deepcopy(self.bias)
         for i in range(self.channel):
             for l in range(self.Rank):
-                wl = ((l+1) * self.ff* math.pi* 2.0) 
+                # 分别计算1、2、...5倍基频
+                wl = ((l+1) * self.ff * math.pi * 2.0) 
                 q[i] = q[i] + a[l,i]/wl * np.sin(wl * t) - b[l,i]/wl * np.cos(wl * t)
         return q
 
@@ -209,10 +212,8 @@ class TrajGeneration(Node):
         return pos_l, vel_l, tau_ext_l
     
     # 生成优化轨迹，返回Fourier系数a、b和信息矩阵函数fc
-    def generate_opt_traj_Link(self,Ff, sampling_rate, Rank=5, q_min=-2.0*np.ones(7), q_max =2.0*np.ones(7), q_vmin=-8.0*np.ones(7),q_vmax=8.0*np.ones(7), f_path = None, g_path=None,bias=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]):
+    def generate_opt_traj_Link(self, Ff, sampling_rate, Rank=5, q_min=-2.0*np.ones(7), q_max =2.0*np.ones(7), q_vmin=-8.0*np.ones(7),q_vmax=8.0*np.ones(7), f_path = None, g_path=None,bias=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]):
         warnings.warn("The 'deprecated_method' is deprecated and will be removed in a future version.", DeprecationWarning, stacklevel=2 )
-        # 从完整惯性参数中分离可独立辨识列Pb和相关列Pd
-        # 输入: 7:自由度 80:动力学参数总数 Ymat:动力学回归矩阵函数
         # 输出: Pb:选择线性独立列的矩阵 Pd:选择依赖列的矩阵 Kd:依赖列相对于独立列的系数(满足关系 Z*Pd = Z*Pb*Kd，Z为观测矩阵)
         Pb, Pd, Kd = find_dyn_parm_deps(7, 80, self.Ymat)
         # 计算一个周期内的样本数
@@ -224,36 +225,41 @@ class TrajGeneration(Node):
         a = cs.SX.sym('a', Rank, 7)
         b = cs.SX.sym('b', Rank, 7)
         t = cs.SX.sym('t', 1)
+        # 生成符号函数表示的傅立叶函数
         fourierF = fourierInstance.FourierFunction(t, a, b,'f1')
-        fourier = fourierF(a,b,t)
-        # 使用符号自动微分，避免手写qd、qdd与q的定义不一致
+        # 生成符号变量表示的傅立叶函数数值结果
+        fourier = fourierF(a, b, t)
+        # 计算符号表示的傅立叶级数轨迹的数值速度和数值加速度
         fourierDot = [optas.jacobian(fourier[i],t) for i in range(len(fourier))]
         fourierDDot = [optas.jacobian(fourierDot[i],t) for i in range(len(fourierDot))]
         print(fourierDot)
         path_pos = os.path.join(get_package_share_directory("med7_dock_description"), "meshes", "EndEffector.STL", )
-        # 用末端STL的凸包点代表末端几何体，减少进入优化器的点数量
+        # 用末端STL的凸包点代表末端几何体
         points = get_convex_hull(path_pos)
         print("points", points)
         vfs_fun = []
         # 每个凸包点分别对link_2到link_5建立椭球外部约束
         for point in points:
-            for i in range(2,6):
+            for i in range(2, 6): # i分别取2...5
                 vfs_fun.append(getConstraintsinJointSpace(self.robot, point_coord=point, base_link="link_"+str(i), base_joint_name="A"+str(i) ))
+        # 初始化回归矩阵变量
         Y_ = []
         Y_fri = []
         pfun_list = []
         # 在一个周期内逐点计算q/qd/qdd,动力学回归块和避碰约束
         for k in range(pointsNum):
             tc = 1.0/(sampling_rate) * k
-            q_list = [optas.substitute(id, t, tc) for id in fourier]#fourier(a,b,tc)
-            qd_list = [optas.substitute(id, t, tc) for id in fourierDot] #fourierDot(a,b,tc)
-            qdd_list = [optas.substitute(id, t, tc) for id in fourierDDot]#fourierDDot(a,b,tc)
+            # 把符号t换成数值tc，采样符号表示的傅立叶级数轨迹的位置、速度、加速度数值
+            q_list = [optas.substitute(id, t, tc) for id in fourier]
+            qd_list = [optas.substitute(id, t, tc) for id in fourierDot] 
+            qdd_list = [optas.substitute(id, t, tc) for id in fourierDDot]
+            # 竖直堆叠
             q = cs.vertcat(*q_list)
             qd = cs.vertcat(*qd_list)
             qdd = cs.vertcat(*qdd_list)
-            # 单个时刻的块有7行；乘Pb后只保留基本惯性参数列
-            Y_temp = self.Ymat(q, qd, qdd) @Pb
-            # 摩擦模型 tau_f = Fc*sign(qd) + Fv*qd。
+            # 单个时刻的块有7行；乘Pb保留基本惯性参数列
+            Y_temp = self.Ymat(q, qd, qdd) @ Pb
+            # 摩擦模型 tau_f = Fc*sign(qd) + Fv*qd
             fri_ = cs.diag(cs.sign(qd))
             fri_ = cs.horzcat(fri_,  cs.diag(qd))
             for j in range(len(vfs_fun)):
@@ -261,10 +267,9 @@ class TrajGeneration(Node):
             # print("pfun_list = ",pfun_list)
             Y_.append(Y_temp)
             Y_fri.append(fri_)
-        # 沿行方向堆叠所有时刻，形成整个实验轨迹的观测矩阵。
+        # 沿竖直方向堆叠所有时刻形成整个轨迹的观测矩阵
         Y_r = optas.vertcat(*Y_)
         Y_fri1 = optas.vertcat(*Y_fri)
-        # 此旧入口当前仅用惯性部分优化；包含摩擦的写法保留在下一行。
         Y = Y_r
         # Y = cs.horzcat(Y_r, Y_fri1)
         # print(Y)
