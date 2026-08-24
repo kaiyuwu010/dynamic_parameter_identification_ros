@@ -293,7 +293,7 @@ class TrajGeneration(Node):
         ubg4 = []
         ubg5 = []
         ubg6 = []
-        # 为每个关节汇总各阶Fourier系数，构造周期和幅值约束
+        # 为每个关节构造周期和幅值约束
         for i in range(7):
             for l in range(5):
                 # 三个等式约束用于限定周期连接处的位置/速度/加速度状态
@@ -326,18 +326,19 @@ class TrajGeneration(Node):
             ubg5.append(q_vmax[i])
         # 将所有约束表达式和上下界按顺序拼接，形成单个向量 g、lbg、ubg
         g = cs.simplify(cs.vertcat(*(a_eq1 + a_eq2 + b_eq1 + ab_sq_ineq1 + ab_sq_ineq2 + ab_sq_ineq3 + pfun_list)))
-        lbg = cs.vertcat(*(lbg1,lbg2,lbg3,lbg4,lbg5,lbg6, [-1.0]*len(pfun_list)))
-        ubg = cs.vertcat(*(ubg1,ubg2,ubg3,ubg4,ubg5,ubg6, [1e10]*len(pfun_list)))
+        lbg = cs.vertcat(*(lbg1, lbg2, lbg3, lbg4, lbg5, lbg6, [-1.0]*len(pfun_list)))
+        ubg = cs.vertcat(*(ubg1, ubg2, ubg3, ubg4, ubg5, ubg6, [1e10]*len(pfun_list)))
         # A矩阵是信息矩阵，指标着轨迹对参数的辨识能力；A越接近奇异，参数估计的方差就越大
         A = Y.T @ Y
         A_inv = cs.inv(A)
-        # f1 是 Frobenius 条件数；越小通常表示参数方向激励越均衡
+        # f1是Frobenius条件数；越小通常表示参数方向激励越均衡
         f1 = cs.simplify(1.0*cs.norm_fro(A) * cs.norm_fro(A_inv))
         f = cs.simplify(1.0*cs.norm_fro(A) + cs.norm_fro(A_inv))
-        x = cs.reshape(cs.vertcat(a,b),(1, 2*Rank*7))
-        fc = optas.Function('fc',[a,b],[A])
-        f_fun = optas.Function('ff',[a,b],[f])
-        g_fun = optas.Function('gf',[a,b],[g])
+        # 合并a、b重排成包含2*Rank*7个元素的行向量
+        x = cs.reshape(cs.vertcat(a, b), (1, 2*Rank*7))
+        fc = optas.Function('fc', [a, b], [A])
+        f_fun = optas.Function('ff', [a, b], [f])
+        g_fun = optas.Function('gf', [a, b], [g])
         G_max = 1
         values_f_min = 10e25
         eps = 0.03
@@ -348,24 +349,27 @@ class TrajGeneration(Node):
         # 约束向量的上下界必须与g的顺序完全一致
         problem1 = {'x': x,'f':f1, 'g': g}
         S1 = cs.nlpsol('S', 'ipopt', problem1, {'ipopt':{'max_iter':50000 }, 'verbose':False, "ipopt.hessian_approximation":"limited-memory"})
+        # 随机初始化a、b
         _x0_best = None
-        x_sample_temp = eps* np.random.random (size= (1,2*Rank*7))
+        x_sample_temp = eps* np.random.random(size = (1, 2*Rank*7))
         init_x0 = copy.deepcopy(x_sample_temp)
-        a_init, b_init =  np.split(x_sample_temp.reshape(2*Rank,7),2)
+        a_init, b_init =  np.split(x_sample_temp.reshape(2*Rank, 7), 2)
         g_data = g_fun(a_init, b_init)
+        # 检测是否包含nan值
         contains_nan(g_data)
-        print("a_eq1 = ",len(a_eq1))
-        print("a_eq2 = ",len(a_eq2))
-        print("b_eq1 = ",len(b_eq1))
-        print("ab_sq_ineq1 = ",len(ab_sq_ineq1))
-        print("ab_sq_ineq2 = ",len(ab_sq_ineq2))
-        print("ab_sq_ineq3 = ",len(ab_sq_ineq3))
+        print("a_eq1 = ", len(a_eq1))
+        print("a_eq2 = ", len(a_eq2))
+        print("b_eq1 = ", len(b_eq1))
+        print("ab_sq_ineq1 = ", len(ab_sq_ineq1))
+        print("ab_sq_ineq2 = ", len(ab_sq_ineq2))
+        print("ab_sq_ineq3 = ", len(ab_sq_ineq3))
         # 多起点搜索：先随机寻找满足边界的初值，再交给 IPOPT 局部优化。
         for iter in range(G_max):
+            # 随机寻找满足边界的初值
             for num in range(reject_sample):
-                x_sample_temp = eps* np.random.random (size= (1,2*Rank*7))
+                x_sample_temp = eps* np.random.random (size = (1, 2*Rank*7))
                 init_x0 = copy.deepcopy(x_sample_temp)
-                a_init, b_init =  np.split(x_sample_temp.reshape(2*Rank,7),2)
+                a_init, b_init =  np.split(x_sample_temp.reshape(2*Rank, 7), 2)
                 g_data = g_fun(a_init, b_init)
                 if(np.all(g_data < ubg) and np.all(g_data > lbg)):
                     print("Find a initial solution here")
@@ -374,7 +378,7 @@ class TrajGeneration(Node):
             # 将随机初值拆分为a、b两个矩阵
             a_init, b_init =  np.split(x_sample_temp.reshape(2*Rank, 7), 2)
             for k in range(1):
-                # 调用IPOPT求解器，优化Fourier系数
+                # 优化Fourier系数
                 sol = S(x0 = init_x0, lbg = lbg, ubg = ubg)
                 init_x0 = sol['x']
             # 将优化结果拆分为a、b两个矩阵
@@ -395,7 +399,7 @@ class TrajGeneration(Node):
                     break
         # 如果找到了最优解，则将其拆分为a、b并返回
         if(_x0_best is not None):
-            x_split1, x_split2 = cs.vertsplit(cs.reshape(_x0_best, (2*Rank,7)), Rank)
+            x_split1, x_split2 = cs.vertsplit(cs.reshape(_x0_best, (2*Rank, 7)), Rank)
             print("sol = {0}".format(_x0_best))
         else:
             print("Cannot finda a result!")
@@ -425,7 +429,6 @@ class TrajGeneration(Node):
         ab_sq_ineq1 = [0.0]*7
         ab_sq_ineq2 = [0.0]*7
         ab_sq_ineq3 = []
-
         # lbg*/ubg*与上述表达式分组一一对应，最后按相同顺序拼接。
         lbg1 = []
         lbg2 = []
@@ -456,13 +459,13 @@ class TrajGeneration(Node):
                 ab_sq_ineq3.append(a[l,i])
                 ab_sq_ineq3.append(b[l,i])
                 # 单系数边界取位置诱导界和速度界中更严格的一项
-                cpr2 = min((l+1)*Ff/5.0*2.0*math.pi*q_max[i],q_vmax[i])
-                cpr = max((l+1)*Ff/5.0*2.0*math.pi*q_min[i],q_vmin[i])
+                cpr2 = min((l+1)*Ff/5.0*2.0*math.pi*q_max[i], q_vmax[i])
+                cpr = max((l+1)*Ff/5.0*2.0*math.pi*q_min[i], q_vmin[i])
                 lbg6.append(cpr)
                 lbg6.append(cpr)
                 ubg6.append(cpr2)
                 ubg6.append(cpr2)
-            # 前三组上下界相等，所以 IPOPT 将其视为等式约束
+            # 前三组上下界相等，所以IPOPT将其视为等式约束
             lbg1.append(0.0)
             lbg2.append(0.0)
             lbg3.append(0.0)
@@ -471,12 +474,12 @@ class TrajGeneration(Node):
             ubg1.append(0.0)
             ubg2.append(0.0)
             ubg3.append(0.0)
-            ubg4.append(Ff* math.pi* 2.0  *q_max[i])
+            ubg4.append(Ff * math.pi * 2.0 * q_max[i])
             ubg5.append(q_vmax[i])
         # CasADi NLP只接受一个g，表达式和上下界必须保持完全相同的顺序
-        g = cs.vertcat(*(a_eq1+  a_eq2+  b_eq1+  ab_sq_ineq1+ ab_sq_ineq2 + ab_sq_ineq3 ))
-        lbg = cs.vertcat(*(lbg1,lbg2,lbg3,lbg4,lbg5,lbg6))
-        ubg = cs.vertcat(*(ubg1,ubg2,ubg3,ubg4,ubg5,ubg6))
+        g = cs.vertcat(*(a_eq1 +  a_eq2 +  b_eq1 +  ab_sq_ineq1 + ab_sq_ineq2 + ab_sq_ineq3))
+        lbg = cs.vertcat(*(lbg1, lbg2, lbg3, lbg4, lbg5, lbg6))
+        ubg = cs.vertcat(*(ubg1, ubg2, ubg3, ubg4, ubg5, ubg6))
         return g, lbg, ubg
     
     # 堆叠各采样时刻的基本惯性参数与摩擦参数回归矩阵
@@ -893,10 +896,10 @@ class TrajGeneration(Node):
         f = _f(a,b)
         return f
 
+    # 离线分析保存的目标和约束函数
     def load_analyse_data(self,path_f, path_g):
-        """遗留的群体搜索实验，用于离线分析保存的目标和约束函数。"""
-        a = cs.SX.sym('a', 5,7)
-        b = cs.SX.sym('b', 5,7)
+        a = cs.SX.sym('a', 5, 7)
+        b = cs.SX.sym('b', 5, 7)
         x = cs.reshape(cs.vertcat(a,b),(1, 70))
         _f = cs.Function.load(path_f)
         _g = cs.Function.load(path_g)
@@ -974,7 +977,6 @@ class TrajGeneration(Node):
                     chromosome[r2] = eps
                 if chromosome[r2] > -eps:
                     chromosome[r2] = -eps
-
                 offspring[i,:] = chromosome
             return offspring
         
@@ -983,7 +985,6 @@ class TrajGeneration(Node):
         rate_local_search = 10      # number of chromosomes that we apply local_search to
         step_size = 0.02
         pop_size = 100
-
         pop = 2.0* np.random.random (size= (pop_size,70))
         
         for iter in range(G_max):
@@ -1008,106 +1009,50 @@ class TrajGeneration(Node):
         print("x_temp=", x_temp)
         raise ValueError("Run to here {0}".format(output))
 
-
-
-
-
 class TrajGenerationUsrPath(TrajGeneration):
     def __init__(self, path=None, node_name = "para_estimatior", dt_ = 5.0, N_ = 100, gravity_vector=[4.905, 0.0, -8.496], ) -> None:
         Node.__init__(self, node_name=node_name)
         if(path is None):
             raise ValueError("This Class need a pathdefine")
-        # self.dt_ = dt_
-        # self.declare_parameter("model", "med7")
-        # self.model_ = str(self.get_parameter("model").value)
-        # path = os.path.join(
-        #     get_package_share_directory("lbr_description"),
-        #     "urdf",
-        #     self.model_,
-        #     f"{self.model_}.urdf.xacro",
-        # )
-        # self.N = N_
         _path = path
         gv = gravity_vector
         self.initial_model_params(_path, gv)
 
 def mainO(args=None):
-    """当前入口：使用仓库内 XArm 模型优化并导出轨迹。
-
-    初始化 ROS 后定位 XArm Xacro，以 20 Hz 构造优化问题，再以 100 Hz
-    输出完整周期 CSV，最后打印信息矩阵特征值及条件性指标。
-    """
     rclpy.init(args=args)
-
-    path_xarm = os.path.join(
-            get_package_share_directory("gravity_compensation"),
-            "urdf",
-            "xarm",
-            "xarm7base.urdf.xacro",
-        )
-    
-    # path_xarm = os.path.join(
-    #         get_package_share_directory("lbr_description"),
-    #         "urdf",
-    #         "med7",
-    #         "med7.xacro",
-    #     )
-
-    # path_xarm = os.path.join(
-    #         get_package_share_directory("gravity_compensation"),
-    #         "urdf",
-    #         "med7dock.urdf.xacro",
-    #     )
-    
+    path_xarm = os.path.join(get_package_share_directory("gravity_compensation"), "urdf", "xarm", "xarm7base.urdf.xacro",)
+    # path_xarm = os.path.join(get_package_share_directory("lbr_description"), "urdf", "med7", "med7.xacro",)
+    # path_xarm = os.path.join(get_package_share_directory("gravity_compensation"), "urdf", "med7dock.urdf.xacro", )
     # print("path_xarm = ",path_xarm)
-
     # XArm 使用世界坐标系竖直向下的标准重力向量。
     paraEstimator = TrajGenerationUsrPath(path=path_xarm, gravity_vector=[0,0,-9.81])
-    # 基频 0.1 Hz 对应 10 s 周期；优化时降采样，导出时使用 100 Hz。
+    # 基频0.1Hz，优化时降采样，导出时使用100Hz
     Ff = 0.1
     sampling_rate = 100.0
-    # 优化阶段降采样以减小符号图，导出阶段再提高到 100 Hz。
+    # 优化阶段降采样以减小符号图，导出阶段再提高到100Hz
     sampling_rate_inoptimization = 20.0
-
-    theta1 = 0.0
-    theta2 = -0.5233
-
     # a,b,fc = paraEstimator.generate_opt_traj_Link(Ff = Ff,sampling_rate = sampling_rate_inoptimization, bias = [0, 0, 0.0, 1.9, 0.0, 1.0, 0.0],q_min=[-6.2, -2.0, -6.2, -0.19, -6.2, -1.69, -6.2],q_max=[6.2, 2.0, 6.2, 3.94, 6.2, 3.14, 6.2])
-    a,b,fc = paraEstimator.generate_opt_traj_Link(Ff = Ff,sampling_rate = sampling_rate_inoptimization, bias = [0, 0, 0.0, 0.0, 0.0, 1.0, 0.0],q_min=[-6.2, -12.0, -16.2, -10.19, -16.2, -11.69, -16.2],q_max=[6.2, 12.0, 16.2, 13.94, 16.2, 13.14, 16.2])
+    a,b,fc = paraEstimator.generate_opt_traj_Link(Ff = Ff,sampling_rate = sampling_rate_inoptimization, bias = [0, 0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                                                  q_min=[-6.2, -12.0, -16.2, -10.19, -16.2, -11.69, -16.2],q_max=[6.2, 12.0, 16.2, 13.94, 16.2, 13.14, 16.2])
     # a,b,fc = paraEstimator.generate_opt_traj_Link(Ff = Ff,sampling_rate = sampling_rate_inoptimization)
     print("a = {0} \n b = {1}".format(a,b))
-
     ret = paraEstimator.generateToCsv(a,b,Ff = Ff,sampling_rate=sampling_rate)
-
     if ret:
         print("Done! Congratulations! self-collision avoidance")
-        
         eigenvalues, eigenvectors = np.linalg.eig(fc(a,b))
-
         print("fc = ",eigenvalues)
         print("a = {0} \n b = {1}".format(a,b))
         conditional_num = np.sqrt(eigenvalues[0]/eigenvalues[-1])
         print("conditional_num_best = ",conditional_num)
-
     rclpy.shutdown()
 
 
 def main(args=None):
-    """MED7 实验入口：遍历前两关节偏置并比较信息矩阵条件性。
-
-    theta1/theta2 改变周期运动中心，也会改变关节限位和碰撞约束的可行域。
-    该函数目前不是文件末尾 ``__main__`` 实际调用的入口。
-    """
     rclpy.init(args=args)
     paraEstimator = TrajGeneration()
     Ff = 0.1
     sampling_rate = 100.0
     sampling_rate_inoptimization = 20.0
-
-    # first Try
-    # theta_range = [-1.0, -0.7, -0.5, -0.3, -0.1, 0.0, 0.1, 0.3, 0.5, 0.7, 1.0]
-
-    # Refine
     theta_range = [-0.5233, -0.2, 0.0]
     conditional_num_best = 1000000000.0
     # 对前两个关节的候选偏置做笛卡尔积搜索。
@@ -1117,10 +1062,8 @@ def main(args=None):
             print("a = {0} \n b = {1}".format(a,b))
             eigenvalues, eigenvectors = np.linalg.eig(fc(a,b))
             print("fc = ",eigenvalues)
-
             # 注意：这里直接取首尾特征值，代码没有显式排序。
             conditional_num = np.sqrt(eigenvalues[0]/eigenvalues[-1])
-
             if conditional_num<conditional_num_best:
                 conditional_num_best = conditional_num
                 best_theta = [theta1, theta2]
@@ -1128,24 +1071,14 @@ def main(args=None):
                 b_best = b
     print("conditional_num_best = ",conditional_num_best)
     print("best_theta = ",best_theta)
-
-
-
-
     ret = paraEstimator.generateToCsv(a,b,Ff = Ff,sampling_rate=sampling_rate)
-
     if ret:
         print("Done! Congratulations! self-collision avoidance")
-        
         eigenvalues, eigenvectors = np.linalg.eig(fc(a,b))
-
         print("fc = ",eigenvalues)
         print("a = ",a_best)
         print("b = ",b_best)
-
     rclpy.shutdown()
 
-
 if __name__ == "__main__":
-    # 直接执行本文件时走自定义 XArm 路径，而不是上面的 MED7 main()。
     mainO()

@@ -1,5 +1,7 @@
 #!/usr/bin/python3
 import optas
+import casadi as cs
+
 import sys
 import numpy as np
 import pybullet as pb
@@ -27,10 +29,8 @@ from sklearn.tree import DecisionTreeClassifier
 from sklearn.linear_model import LinearRegression
 from identification_numerics import differentiate_positions, scaled_least_squares
 
-Order = [0,1,2,3,4,5,6]
-import numpy as np
 
-"""动力学参数辨识数值计算工具模块"""
+Order = [0,1,2,3,4,5,6]
 
 # 执行加权最小二乘法进行参数估计，H: 回归矩阵，大小为 (m, n)  i: 电流数据，大小为 (m, 1)
 def weighted_least_squares(H, i, max_iterations=100, tolerance=1e-6):
@@ -76,9 +76,9 @@ class Estimator():
         # 获取机器人关节参数
         Nb, xyzs, rpys, axes = getJointParametersfromURDF(self.robot)
         # 计算机器人动力学模型
-        self.dynamics_ = RNEA_function(Nb,1,rpys,xyzs,axes,gravity_para = cs.DM(gravity_vec))
+        self.dynamics_ = RNEA_function(Nb, 1, rpys, xyzs, axes, gravity_para = cs.DM(gravity_vec))
         # 通过动态线性化方法获取动力学回归矩阵和参数向量
-        self.Ymat, self.PIvector = DynamicLinearlization(self.dynamics_,Nb)
+        self.Ymat, self.PIvector = DynamicLinearlization(self.dynamics_, Nb)
         # 读取urdf
         urdf_string_ = xacro.process(path)
         robot = urdf.URDF.from_xml_string(urdf_string_)
@@ -103,7 +103,7 @@ class Estimator():
                 l.append([float(x) for x in row.values()])
         return l    
     
-    # 从csv
+    # 从CSV文件读取关节位置和力矩，然后计算关节速度
     def ExtractFromMeasurmentCsv(self, path_pos):
         dt = 0.01
         pos_l = []
@@ -120,6 +120,7 @@ class Estimator():
         vel_l, _ = differentiate_positions(pos_l, dt)
         return pos_l, vel_l.tolist(), tau_ext_l
     
+    # 从测量数据中提取关节位置和关节力矩，并通过位置差分计算关节速度
     def ExtractFromMeasurmentList(self, pos_list):
         dt = 0.01
         pos_l = []
@@ -133,6 +134,7 @@ class Estimator():
         vel_l, _ = differentiate_positions(pos_l, dt)
         return pos_l, vel_l.tolist(), tau_ext_l
 
+    # 从测量数据中提取七个关节的位置和外力矩，并把所有关节速度设置为0
     def ExtractFromMeasurmentListZeroVel(self, pos_list):
         dt = 0.01
         pos_l = []
@@ -148,15 +150,15 @@ class Estimator():
             vel_l.append([0.0, 0.0,0.0, 0.0,0.0, 0.0,0.0])
         return pos_l, vel_l, tau_ext_l    
        
-    # 保存
+    # 把数据以字典行的形式写入CSV文件
     def save_(self, csv_file, keys: List[str], values_list: List[List[float]]) -> None:
         csv_writer = csv.DictWriter(csv_file, fieldnames=keys)
         csv_writer.writeheader()
         for values in values_list:
-            csv_writer.writerow({key: value for key, value in zip(keys,values)})
+            csv_writer.writerow({key: value for key, value in zip(keys, values)})
     
     def timer_cb_regressor_physical_con_impt_samp(self, positions, velocities, efforts):
-        Pb, Pd, Kd =find_dyn_parm_deps(7,80,self.Ymat)
+        Pb, Pd, Kd = find_dyn_parm_deps(7, 80, self.Ymat)
         K = Pb.T +Kd @Pd.T
         taus = []
         Y_ = []
@@ -275,7 +277,7 @@ class Estimator():
         problem2 = {'x': _estimate, 'f': obj2, 'g': cs.vertcat(*ineq_constr)}
         solver2 = cs.nlpsol('S', 'ipopt', problem2, opts)
         sol2 = solver2(x0 = sol['x'])
-        return sol2['x'],np.array(gt_x0)
+        return sol2['x'], np.array(gt_x0)
     
     # 计算
     def get_Yb_matrix(self, positions, velocities, efforts,Pb):
@@ -302,62 +304,60 @@ class Estimator():
         Y_fri1 = np.vstack(Y_fri)
         return Y_r, taus1, Y_fri1
     
-    # 构建不等式物理约束
+    # 对惯性参数构建不等式物理约束
     @staticmethod
-    def build_ineq_physical_con(_estimate,
-                                _w0, # max index of mass
-                                _w1, # size1 of mass center 
-                                _h1, # size2 of mass center
-                                _w2, # size1 of inertia
-                                _h2  # size2 of inertia
-                                ):
-        l1 = _w0 + _w1*_h1
+    def build_ineq_physical_con(_estimate, _w0, _w1, _h1, _w2, _h2):
+        # 质量参数和质心参数数量和
+        l1 = _w0 + _w1 *_h1
+        # 所有惯性参数数量和
         l2 = l1 + _w2 * _h2
-        Inertia = _estimate[l1:l2].reshape((_w2,_h2))
+        # 得到惯量矩阵
+        Inertia = _estimate[l1:l2].reshape((_w2, _h2))
+        # 每三列切分为一个连杆的3X3惯量矩阵
         list_of_intertia_norminal = [Inertia[:, i:i+3] for i in range(0, Inertia.shape[1], 3)]
         constraints, lower, upper = [], [], []
-        def bounded(expression, lb=-np.inf, ub=np.inf):
+        # 辅助函数用于构造约束列表
+        def bounded(expression, lb = -np.inf, ub = np.inf):
             constraints.append(expression)
             lower.append(lb)
             upper.append(ub)
+        # 对质量构建约束，大于0
         for i in range(_w0):
             bounded(_estimate[i], 1e-6, np.inf)
+        # 对转动惯量构建约束
         for I in list_of_intertia_norminal:
-            # The URDF inertia tensor is symmetric.  Explicit equality
-            # constraints prevent the unused lower-triangular entries from
-            # becoming arbitrary optimization variables.
+            # 必须对称
             bounded(I[0, 1] - I[1, 0], 0.0, 0.0)
             bounded(I[0, 2] - I[2, 0], 0.0, 0.0)
             bounded(I[1, 2] - I[2, 1], 0.0, 0.0)
-            # Sylvester criterion for a symmetric positive-definite inertia.
+            # 惯量矩阵必须正定
+            # 一阶主子式大于0
             bounded(I[0, 0], 1e-8, np.inf)
+            # 二阶顺序主子式大于0
             bounded(I[0, 0] * I[1, 1] - I[0, 1] ** 2, 1e-12, np.inf)
+            # 三姐顺序主子式大于0
             bounded(cs.det(I), 1e-15, np.inf)
-            # Principal moments of a rigid body obey triangle inequalities.
+            # 任意一个方向的惯量，都不能大于另外两个方向惯量之和
             bounded(I[1, 1] + I[2, 2] - I[0, 0], 0.0, np.inf)
             bounded(I[0, 0] + I[2, 2] - I[1, 1], 0.0, np.inf)
             bounded(I[0, 0] + I[1, 1] - I[2, 2], 0.0, np.inf)
-        # Coulomb and viscous friction magnitudes are non-negative in the
-        # adopted sign(qd) + qd convention.
+        # 库伦摩擦和黏滞摩擦必须大于0
         for i in range(l2, _estimate.numel()):
             bounded(_estimate[i], 0.0, np.inf)
         return constraints, lower, upper
     
-    # 
+    # 拼接仿真中的名义物理参数和预设摩擦参数，便于与辨识出的参数做对比
     @staticmethod
-    def get_gt_params_sim(mass_norminal, mass_center_norminal, intertia_norminal, nj, fri_p1=0.1, fri_p2=0.5):
-        # mass_norminal = self.masses_np
-        # mass_center_norminal = self.massesCenter_np.reshape(-1,_w1*_h1).flatten()
-        # intertia_norminal = self.Inertia_np.reshape(-1,_w2*_h2).flatten()
-        gt_x0 = mass_norminal.tolist()+mass_center_norminal.tolist()+intertia_norminal.tolist()+[fri_p1]*nj+[fri_p2]*nj
+    def get_gt_params_sim(mass_norminal, mass_center_norminal, intertia_norminal, nj, fri_p1 = 0.1, fri_p2 = 0.5):
+        gt_x0 = mass_norminal.tolist() + mass_center_norminal.tolist() + intertia_norminal.tolist() + [fri_p1]*nj + [fri_p2]*nj
         return gt_x0
     
-    # 
+    # 从机器人模型中读取惯性参数，再补上默认摩擦参数，拼接成完整的仿真真值参数向量
     def get_gt_params_simO(self):
         nj = self.robot.ndof
         mass_norminal = self.masses_np
-        _w1, _h1 =self.massesCenter_np.shape
-        _w2, _h2 =self.Inertia_np.shape
+        _w1, _h1 = self.massesCenter_np.shape
+        _w2, _h2 = self.Inertia_np.shape
         mass_center_norminal = self.massesCenter_np.reshape(-1,_w1*_h1).flatten()
         intertia_norminal = self.Inertia_np.reshape(-1,_w2*_h2).flatten()
         gt_x0 = Estimator.get_gt_params_sim(mass_norminal, mass_center_norminal, intertia_norminal, nj)
@@ -367,77 +367,77 @@ class Estimator():
     def timer_cb_regressor_physical_con(self, positions, velocities, efforts):
         nj = len(positions[0])
         # 获取动力学参数独立矩阵
-        Pb, Pd, Kd =find_dyn_parm_deps(7,80,self.Ymat)
-        K = Pb.T +Kd @Pd.T
-        # 计算
+        Pb, Pd, Kd = find_dyn_parm_deps(7, 80, self.Ymat)
+        # 由Y*Pd = Y*Pb*Kd
+        K = Pb.T + Kd @ Pd.T
+        # 根据位置、速度、加速度，计算回归矩阵、关节力矩向量、摩擦参数回归矩阵
         Y_r, taus1, Y_fri1 = self.get_Yb_matrix(positions, velocities, efforts, Pb)
-        print("self.masses_np = ",self.masses_np)
-        _w1, _h1 =self.massesCenter_np.shape
-        _w2, _h2 =self.Inertia_np.shape
+        print("self.masses_np = ", self.masses_np)
+        _w1, _h1 = self.massesCenter_np.shape
+        _w2, _h2 = self.Inertia_np.shape
+        # 质量参数数量
         _w0 = len(self.masses_np)
-        l1 = _w0 + _w1*_h1
+        # 质量参数和质心参数数量和
+        l1 = _w0 + _w1 * _h1
+        # 所有惯性参数数量和
         l2 = l1 + _w2 * _h2
-        # with friction
-        l = l2+ nj*2
+        # 待辨识参数长度，带摩擦参数
+        l = l2 + nj*2
+        # 生成待辨识参数符号向量
         _estimate = cs.SX.sym('para', l)
+        # 把待优化的物理参数转换成最小动力学参数
         estimate_cs = K @ self.PIvector(_estimate[0:_w0], _estimate[_w0:l1].reshape((_w1,_h1)), _estimate[l1:l2].reshape((_w2,_h2)))
-        obj = cs.sumsqr(taus1 - Y_r @ estimate_cs -Y_fri1 @ _estimate[-nj*2:]) + 10.0 * cs.norm_2(_estimate[:_w0]) + 100.0 * cs.norm_2(_estimate[_w0:l1]) + 100.0 * cs.norm_2(_estimate[l1:l2])
-        # Inertia = _estimate[l1:l2].reshape((_w2,_h2))
-        # list_of_intertia_norminal = [Inertia[:, i:i+3] for i in range(0, Inertia.shape[1], 3)]
+        # 定义参数辨识的目标函数，包括力矩拟合误差物理参数正则化两部分
+        obj = cs.sumsqr(taus1 - Y_r @ estimate_cs - Y_fri1 @ _estimate[-nj*2:]) 
+        + 10.0*cs.norm_2(_estimate[:_w0]) + 100.0*cs.norm_2(_estimate[_w0:l1]) + 100.0*cs.norm_2(_estimate[l1:l2])
+        # 为待辨识参数生成约束表达式、约束下界、约束上界
         ineq_constr, constraint_lb, constraint_ub = Estimator.build_ineq_physical_con(_estimate, _w0, _w1, _h1, _w2, _h2)
         problem = {'x': _estimate, 'f': obj, 'g': cs.vertcat(*ineq_constr)}
-        # solver = cs.qpsol('solver', 'qpoases', problem)
-        # solver = cs.nlpsol('S', 'ipopt', problem,{'ipopt':{'max_iter':3000000 }, 'verbose':True})
         opts = {
             'ipopt': {
-                'max_iter': 5000,  # 提高最大迭代次数
-                'tol': 1e-10,  # 更严格的容忍度
-                'constr_viol_tol': 1e-9,  # 约束违反容差
-                'compl_inf_tol': 1e-9,  # 互补性条件容差
-                'acceptable_tol': 1e-8,  # 更严格的可接受容忍度
-                'acceptable_iter': 20,  # 提高可接受的最大迭代次数
-                'linear_solver': 'mumps',  # 或 'ma57', 'mumps'，选择最适合的求解器
-                'mu_strategy': 'adaptive',  # 自适应 mu 策略
-                'dual_inf_tol': 1e-10,  # 更严格的对偶可行性容忍度
-                'compl_inf_tol': 1e-10,  # 更严格的互补性容忍度
-                'bound_relax_factor': 0,  # 防止约束松弛
+                'max_iter': 5000,                  # 最大迭代次数
+                'tol': 1e-10,                      # 容忍度
+                'constr_viol_tol': 1e-9,           # 约束违反容差
+                'compl_inf_tol': 1e-9,             # 互补性条件容差
+                'acceptable_tol': 1e-8,            # 可接受容忍度
+                'acceptable_iter': 20,             # 可接受最大迭代次数
+                'linear_solver': 'mumps',          # 求解器
+                'mu_strategy': 'adaptive',         # 策略
+                'dual_inf_tol': 1e-10,             # 对偶可行性容忍度
+                'compl_inf_tol': 1e-10,            # 互补性容忍度
+                'bound_relax_factor': 0,           # 防止约束松弛
                 'hessian_approximation': 'exact',  # 使用精确的 Hessian，不使用近似
             },
-            'verbose': False,  # 如果需要调试信息，可以设置为 True
+            'verbose': False,  # 如果需要调试信息，可以设置为True
         }
         # 创建求解器
         solver = cs.nlpsol('S', 'ipopt', problem, opts)
-        # solver = cs.nlpsol('S', 'ipopt', problem,
-        #               {'ipopt':{'max_iter':1000 }, 
-        #                'verbose':False,
-        #                "ipopt.hessian_approximation":"limited-memory"
-        #                })
         print("solver = {0}".format(solver))
+        # 整理名义动力学参数
         mass_norminal = self.masses_np
-        mass_center_norminal = self.massesCenter_np.reshape(-1,_w1*_h1).flatten()
-        intertia_norminal = self.Inertia_np.reshape(-1,_w2*_h2).flatten()
-        
+        mass_center_norminal = self.massesCenter_np.reshape(-1, _w1*_h1).flatten()
+        intertia_norminal = self.Inertia_np.reshape(-1, _w2*_h2).flatten()
+        # 生成用于仿真对比的真实参数向量gt_x0
         gt_x0 = Estimator.get_gt_params_sim(mass_norminal, mass_center_norminal, intertia_norminal, nj)
-        # gt_x0 = mass_norminal.tolist()+mass_center_norminal.tolist()+intertia_norminal.tolist()+[0.1]*nj+[0.5]*nj
-        # init_x0 = [random.randint(0, 10) for _ in range(len(gt_x0))]
         import random
-        init_x0 = (mass_norminal*np.random.uniform(0.0, 2.0, size=mass_norminal.shape)).tolist()+(mass_center_norminal*np.random.uniform(0.0, 2.0, size=mass_center_norminal.shape)
-                ).tolist()+(intertia_norminal*np.random.uniform(0.0, 2.0, size=intertia_norminal.shape)).tolist()+[random.random()*1.0 for _ in range(nj)]+[random.random()*1.0 for _ in range(nj)]
-        # sol = solver(x0 = [0.0]*len(init_x0))
-        sol = solver(x0=init_x0, lbg=constraint_lb, ubg=constraint_ub)
+        # 初始化质量、质心、惯性参数、摩擦
+        init_x0 = (mass_norminal * np.random.uniform(0.0, 2.0, size = mass_norminal.shape)).tolist() 
+        + (mass_center_norminal * np.random.uniform(0.0, 2.0, size = mass_center_norminal.shape)).tolist()
+        + (intertia_norminal * np.random.uniform(0.0, 2.0, size = intertia_norminal.shape)).tolist()
+        + [random.random() * 1.0 for _ in range(nj)] 
+        + [random.random() * 1.0 for _ in range(nj)]
+        # 求解
+        sol = solver(x0 = init_x0, lbg = constraint_lb, ubg = constraint_ub)
         stats = solver.stats()
         if not stats.get('success', False):
             raise RuntimeError("physical parameter optimization failed: " + str(stats.get('return_status', 'unknown status')))
-        return sol['x'],np.array(gt_x0)
+        return sol['x'], np.array(gt_x0)
     
     # 使用最小二乘法估计动力学参数
     def timer_cb_regressor(self, positions, velocities, efforts):
         # 获取动力学参数独立性矩阵
-        Pb, Pd, Kd =find_dyn_parm_deps(7,80,self.Ymat)
-        K = Pb.T +Kd @Pd.T
-        # q_nps = []
-        # qd_nps = []
-        # qdd_nps = []
+        Pb, Pd, Kd = find_dyn_parm_deps(7,80,self.Ymat)
+        K = Pb.T +Kd @ Pd.T
         taus = []
         Y_ = []
         Y_fri = []
@@ -495,7 +495,7 @@ class Estimator():
         print("solver = {0}".format(solver))
         sol = solver()
         print("sol = {0}".format(sol['x']))
-        return sol['x'],estimate_pam
+        return sol['x'], estimate_pam
     
     # 使用估计的参数计算的关节力矩与实际测量的关节力矩之间的误差
     def testWithEstimatedParaIDyn(self, positions, velocities, para_gt, para)->None:
@@ -539,33 +539,38 @@ class Estimator():
     # 使用估计的参数计算的关节力矩与实际测量的关节力矩之间的误差
     def testWithEstimatedParaCon(self, positions, velocities, efforts, para)->None:
         # 获取动力学参数独立性矩阵
-        Pb, Pd, Kd =find_dyn_parm_deps(7,80,self.Ymat)
-        K = Pb.T +Kd @Pd.T
+        Pb, Pd, Kd = find_dyn_parm_deps(7, 80, self.Ymat)
+        K = Pb.T +Kd @ Pd.T
         tau_ests = []
         es = []
         # 使用二阶低通滤波器对速度进行滤波
-        filter_list = [TD_2order(T=0.01) for i in range(7)]
-        _w1, _h1 =self.massesCenter_np.shape
-        _w2, _h2 =self.Inertia_np.shape
+        filter_list = [TD_2order(T = 0.01) for i in range(7)]
+        _w1, _h1 = self.massesCenter_np.shape
+        _w2, _h2 = self.Inertia_np.shape
         _w0 = len(self.masses_np)
         l = _w0 + _h1*_w1 + _w2 * _h2
         l1 = _w0 + _w1*_h1
+        # 构造最小惯性参数集
         estimate_cs = K @ self.PIvector(para[0:_w0], para[_w0:l1].reshape((_w1,_h1)), para[l1:l].reshape((_w2,_h2)))
-        for k in range(1,len(positions),1):
+        for k in range(1, len(positions), 1):
             q_np = [positions[k][i] for i in Order]
             qd_np = [velocities[k][i] for i in Order]
             tau_ext = [efforts[k][i] for i in Order]
             qdlast_np = [velocities[k-1][i] for i in Order]
-            qdd_np = (np.array(qd_np)-np.array(qdlast_np))/0.01#(velocities[k][0]-velocities[k-1][0])
-            # qdd_np = [f(qd_np[id])[1] for id,f in enumerate(filter_list)]
+            # 计算角加速度
+            qdd_np = (np.array(qd_np) - np.array(qdlast_np))/0.01
             pa_size = Pb.shape[1]
-            tau_est_model = (self.Ymat(q_np,qd_np,qdd_np) @Pb@  estimate_cs + np.diag(np.sign(qd_np)) @ para[-2*len(qd_np):-len(qd_np)] + np.diag(qd_np) @ para[-len(qd_np):])
-            # tau_est_model = (self.Ymat(q_np,qd_np,qdd_np) @Pb@  estimate_cs )
+            # 由模型计算各个关节的力矩
+            tau_est_model = (self.Ymat(q_np, qd_np, qdd_np) @ Pb @ estimate_cs 
+                             + np.diag(np.sign(qd_np)) @ para[-2*len(qd_np):-len(qd_np)] 
+                             + np.diag(qd_np) @ para[-len(qd_np):])
+            # 计算值与实际值做差
             e= tau_est_model - tau_ext 
             print("sim_tau = {0}".format(tau_ext))
             print("tau_est_model = {0}".format(tau_est_model))
             # print("tau_error = {0}".format(e))
             print("q_np = {0}".format(q_np))
+            # 保存到列表
             tau_ests.append(tau_est_model.toarray().flatten().tolist())
             es.append(e.toarray().flatten().tolist())
         return tau_ests, es
@@ -620,7 +625,7 @@ class Estimator():
 # 使用butterworth滤波器对轨迹数据进行低通滤波
 def traj_filter(states):
     cols = []
-    l=len(states[0])
+    l = len(states[0])
     fs = 100
     cutoff_freq = 2  # 截止频率为10 Hz
     b, a = signal.butter(4, cutoff_freq / (fs / 2), 'low')
@@ -628,7 +633,7 @@ def traj_filter(states):
     states_filtered = []
     for i in range(l):
         cols.append([float(state[i]) for state in states])
-        filtered_signal.append( signal.filtfilt(b, a, cols[i]))
+        filtered_signal.append(signal.filtfilt(b, a, cols[i]))
     for j in range(len(filtered_signal[0])):
         states_filtered.append([filtered_signal[i][j] for i in range(l)])
     return states_filtered
@@ -636,8 +641,8 @@ def traj_filter(states):
 # 比较轨迹，绘制估计的外部力和实际的外部力
 def compare_traj(states1, states2):
     col1s , col2s = [], []
-    l=len(states1[0])
-    fig, axs = plt.subplots(7, 1, figsize=(8,10))
+    l = len(states1[0])
+    fig, axs = plt.subplots(7, 1, figsize=(8, 10))
     for i in range(l):
         print("states = {0}".format(states2[i]))
         col1s.append([float(state[i]) for state in states1])
@@ -656,13 +661,13 @@ def main(args=None):
     path_pos = os.path.join(get_package_share_directory("gravity_compensation"), "test", "robot_data copy 2.csv", )
     # 从CSV文件中提取位置、速度和努力数据
     positions, velocities, efforts = paraEstimator.ExtractFromMeasurmentCsv(path_pos)
-    velocities=traj_filter(velocities)
-    efforts_f=traj_filter(efforts)
+    velocities = traj_filter(velocities)
+    efforts_f = traj_filter(efforts)
     # 进行参数估计
     estimate_pam, ref_pam = paraEstimator.timer_cb_regressor_physical_con(positions, velocities, efforts_f)
     print("estimate_pam = {0}".format(estimate_pam))
     # 进行测试，使用估计的参数进行控制
-    tau_exts, es =paraEstimator.testWithEstimatedParaCon(positions, velocities, efforts_f,estimate_pam)
+    tau_exts, es = paraEstimator.testWithEstimatedParaCon(positions, velocities, efforts_f,estimate_pam)
     # 保存估计的参数到CSV文件
     paraEstimator.saveEstimatedPara(estimate_pam)
     # 比较轨迹，绘制估计的外部力和实际的外部力
