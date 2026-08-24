@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 import optas
 import casadi as cs
+from typing import List
 
 import sys
 import numpy as np
@@ -36,7 +37,7 @@ Order = [0,1,2,3,4,5,6]
 def weighted_least_squares(H, i, max_iterations=100, tolerance=1e-6):
     return scaled_least_squares(H, i)[0]
 
-# 通过Adaboost选择重要样本，A: 样本矩阵，M_fri: 摩擦矩阵，b: 样本对应的标签或目标值，n_samples: 选择的重要样本数量
+# 选择误差最小的n_samples个样本，A: 样本矩阵，M_fri: 摩擦矩阵，b: 样本对应的标签或目标值，n_samples: 选择的重要样本数量
 def select_important_samples(A, M_fri, b, preds, n_samples):
     # 将 CasADi DM 转换为 NumPy 数组
     A_np = A.full()
@@ -59,9 +60,6 @@ def select_important_samples(A, M_fri, b, preds, n_samples):
     print("M_fri_np = ",M_fri_np.shape)
     print("A_important = ",A_important.shape)
     print("important_indices = ",important_indices.shape)
-    # 将重要样本转换回CasADi DM类型
-    # A_important_cs = cs.DM(A_important)
-    # b_important_cs = cs.DM(b_important)
     return A_important, M_fri_imp, b_important
 
 # 动力学参数估计器
@@ -163,16 +161,10 @@ class Estimator():
         taus = []
         Y_ = []
         Y_fri = []
-        # init_para = np.random.uniform(0.0, 0.1, size=50)
-        # filter_list = [TD_2order(T=0.01) for i in range(7)]
-        # filter_vector = TD_list_filter(T=0.01)
         if len(positions) < 2:
             raise ValueError("at least two samples are required")
         for k in range(1, len(positions)):
-            # print("q_np = {0}".format(q_np))
-            # q_np = np.random.uniform(-1.5, 1.5, size=7)
             q_np = [positions[k][i] for i in Order]
-            # print("velocities[k] = {0}".format(velocities[k]))
             qd_np = [velocities[k][i] for i in Order]
             tau_ext = [efforts[k][i] for i in Order]
             qdlast_np = [velocities[k-1][i] for i in Order]
@@ -181,23 +173,15 @@ class Estimator():
             Y_temp = self.Ymat(q_np, qd_np, qdd_np_list) @Pb 
             fri_ = np.diag([float(np.sign(item)) for item in qd_np])
             fri_ = np.hstack((fri_,  np.diag(qd_np)))
-            # fri_ = [[np.sign(v), v] for v in qd_np]
             Y_.append(Y_temp)
             taus.append(tau_ext)
             Y_fri.append(np.asarray(fri_))
-            # print(qdd_np)
         Y_r = optas.vertcat(*Y_)
         taus1 = np.hstack(taus)
         Y_fri1 = np.vstack(Y_fri)
         pa_size = Y_r.shape[1]
         taus1 = taus1.T
-        # without friction
-        # Y = Y_r #cs.DM(np.hstack((Y_r, Y_fri1)))
-        # with friction
         Y = cs.DM(np.hstack((Y_r, Y_fri1)))
-        # estimate_pam = np.linalg.inv(Y.T @ Y) @ Y.T @ taus1
-        # print("self.masses_np",self.masses_np.shape)
-        # print("self.masses_np",self.massesCenter_np.shape)
         _w1, _h1 =self.massesCenter_np.shape
         _w2, _h2 =self.Inertia_np.shape
         _w0 = len(self.masses_np)
@@ -221,23 +205,17 @@ class Estimator():
         for I in list_of_intertia_norminal:
             Ii = cs.eig_symbolic(I)
             ineq_constr += [Ii[id]>0.0 for id in range(3)]
-        # print("list_of_intertia_norminal = {0}".format(list_of_intertia_norminal[0]))
         ineq_constr += [I[0,0] <=I[1,1] +I[2,2] for I in list_of_intertia_norminal]
         ineq_constr += [I[1,1] <=I[0,0] +I[2,2] for I in list_of_intertia_norminal]
         ineq_constr += [I[2,2] <=I[1,1] +I[0,0] for I in list_of_intertia_norminal]
         ineq_constr += [100.0*cs.mmin(cs.vertcat(I[1,1], I[0,0], I[2,2]))  >=cs.mmax(cs.vertcat(I[1,1], I[0,0], I[2,2])) for I in list_of_intertia_norminal]
-        # ineq_constr += [cs.trace(I)>0.0 for I in list_of_intertia_norminal]
         ineq_constr += [3.0 * list_of_intertia_norminal[j][2,2]<= cs.mmin(cs.vertcat(list_of_intertia_norminal[j][0,0], list_of_intertia_norminal[j][1,1])) for j in [0, 2, 4]]
         ineq_constr += [3.0 * list_of_intertia_norminal[k][1,1]<= cs.mmin(cs.vertcat(list_of_intertia_norminal[k][0,0], list_of_intertia_norminal[k][2,2])) for k in [1, 3]]
         ineq_constr += [1e-4<= I[0,0] for I in list_of_intertia_norminal]
         ineq_constr += [1e-4<= I[1,1] for I in list_of_intertia_norminal]
         ineq_constr += [1e-4<= I[2,2] for I in list_of_intertia_norminal]
         ineq_constr += [cs.mmax(cs.vertcat(cs.norm_2(I[1,0]), cs.norm_2(I[0,2]), cs.norm_2(I[1,2])))<= 0.1*cs.norm_2(cs.mmin(cs.vertcat(I[1,1], I[0,0], I[2,2]))) for I in list_of_intertia_norminal]
-        # ineq_constr += [cs.norm_2(_estimate[_w0+i] - mass_center_norminal[i])> 0.1*cs.norm_2(mass_center_norminal[i]) for i in range(_w1*_h1)]
-        # ineq_constr += [_estimate[i]> 0.0 for i in range(_w2*_h2)]
         problem = {'x': _estimate, 'f': obj, 'g': cs.vertcat(*ineq_constr)}
-        # solver = cs.qpsol('solver', 'qpoases', problem)
-        # solver = cs.nlpsol('S', 'ipopt', problem,{'ipopt':{'max_iter':3000000 }, 'verbose':True})
         opts = {
             'ipopt': {
                 'max_iter': 1000,
@@ -251,27 +229,17 @@ class Estimator():
         }
         # 创建求解器
         solver = cs.nlpsol('S', 'ipopt', problem, opts)
-        # solver = cs.nlpsol('S', 'ipopt', problem,
-        #               {'ipopt':{'max_iter':1000 }, 
-        #                'verbose':False,
-        #                "ipopt.hessian_approximation":"limited-memory"
-        #                })
         print("solver = {0}".format(solver))
-        # sol = S(x0 = init_x0,lbg = lbg, ubg = ubg)
-        gt_x0 = mass_norminal.tolist()+mass_center_norminal.tolist()+intertia_norminal.tolist()+[0.1]*len(qd_np)+[0.5]*len(qd_np)
+        gt_x0 = mass_norminal.tolist() + mass_center_norminal.tolist() + intertia_norminal.tolist() + [0.1]*len(qd_np) + [0.5]*len(qd_np)
         import random
-        init_x0 = (mass_norminal*np.random.uniform(1.5, 3.5, size=mass_norminal.shape)
-            ).tolist()+(mass_center_norminal*np.random.uniform(0.0, 0.2, size=mass_center_norminal.shape)
-                ).tolist()+(intertia_norminal*np.random.uniform(0.0, 0.1, size=intertia_norminal.shape)
-                    ).tolist()+[random.random()*0.05 for _ in range(len(qd_np))]+[random.random()*0.2 for _ in range(len(qd_np))]
-        # init_x0 = [random.randint(0, 100) for _ in range(len(gt_x0))]
-        # sol = solver(x0 = [0.0]*len(init_x0))
+        init_x0 = (mass_norminal*np.random.uniform(1.5, 3.5, size=mass_norminal.shape)).tolist() 
+        + (mass_center_norminal*np.random.uniform(0.0, 0.2, size=mass_center_norminal.shape)).tolist() 
+        + (intertia_norminal*np.random.uniform(0.0, 0.1, size=intertia_norminal.shape)).tolist() 
+        + [random.random()*0.05 for _ in range(len(qd_np))]
+        + [random.random()*0.2 for _ in range(len(qd_np))]
         sol = solver(x0 = init_x0)
-        # print("sol = {0}".format(sol['x']))
-        # print("init_x0 = {0}".format(init_x0))
-        # raise ValueError("run to here")
         preds = taus1 - Y_r @ e_cs_fun(sol['x']) -Y_fri1 @ sol['x'][-len(qd_np)*2:]
-        Y_r1, Y_fri2,taus2 = select_important_samples(Y_r, Y_fri1,taus1, preds,140)
+        Y_r1, Y_fri2, taus2 = select_important_samples(Y_r, Y_fri1, taus1, preds, 140)
         print("Y_fri2 = ", Y_fri2.shape)
         obj2 = cs.sumsqr(taus2 - Y_r1 @ estimate_cs -Y_fri2 @ _estimate[-len(qd_np)*2:])+ 2.0 * cs.norm_2(_estimate[:_w0]) + 5.0 * cs.norm_2(_estimate[_w0:l1]) + 5.0 * cs.norm_2(_estimate[l1:l2])
         problem2 = {'x': _estimate, 'f': obj2, 'g': cs.vertcat(*ineq_constr)}
@@ -279,23 +247,27 @@ class Estimator():
         sol2 = solver2(x0 = sol['x'])
         return sol2['x'], np.array(gt_x0)
     
-    # 计算
-    def get_Yb_matrix(self, positions, velocities, efforts,Pb):
+    # 根据关节位置、速度和测量力矩，构造参数辨识所需的三个量
+    def get_Yb_matrix(self, positions, velocities, efforts, Pb):
         taus = []
         Y_ = []
         Y_fri = []
         if len(positions) < 2:
             raise ValueError("at least two samples are required")
+        # 从第二个样本开始遍历
         for k in range(1, len(positions)):
             q_np = [positions[k][i] for i in Order]
             qd_np = [velocities[k][i] for i in Order]
             tau_ext = [efforts[k][i] for i in Order]
             qdlast_np = [velocities[k-1][i] for i in Order]
-            qdd_np = (np.array(qd_np)-np.array(qdlast_np))/0.01
+            # 求加速度
+            qdd_np = (np.array(qd_np) - np.array(qdlast_np))/0.01
             qdd_np_list = qdd_np.tolist()
-            Y_temp = self.Ymat(q_np, qd_np, qdd_np_list) @Pb 
-            fri_ = np.diag([float(np.sign(item)) for item in qd_np])
-            fri_ = np.hstack((fri_,  np.diag(qd_np)))
+            # 求最小参数集对应的回归矩阵行
+            Y_temp = self.Ymat(q_np, qd_np, qdd_np_list) @ Pb 
+            # 构造摩擦回归矩阵
+            fri_ = np.diag([float(np.sign(item)) for item in qd_np]) # 速度方向
+            fri_ = np.hstack((fri_,  np.diag(qd_np)))                # 把速度方向和速度大小水平堆叠
             Y_.append(Y_temp)
             taus.append(tau_ext)
             Y_fri.append(np.asarray(fri_))
@@ -335,13 +307,13 @@ class Estimator():
             bounded(I[0, 0], 1e-8, np.inf)
             # 二阶顺序主子式大于0
             bounded(I[0, 0] * I[1, 1] - I[0, 1] ** 2, 1e-12, np.inf)
-            # 三姐顺序主子式大于0
+            # 三阶顺序主子式大于0
             bounded(cs.det(I), 1e-15, np.inf)
             # 任意一个方向的惯量，都不能大于另外两个方向惯量之和
             bounded(I[1, 1] + I[2, 2] - I[0, 0], 0.0, np.inf)
             bounded(I[0, 0] + I[2, 2] - I[1, 1], 0.0, np.inf)
             bounded(I[0, 0] + I[1, 1] - I[2, 2], 0.0, np.inf)
-        # 库伦摩擦和黏滞摩擦必须大于0
+        # 库伦摩擦和黏滞摩擦系数必须大于0
         for i in range(l2, _estimate.numel()):
             bounded(_estimate[i], 0.0, np.inf)
         return constraints, lower, upper
@@ -358,8 +330,8 @@ class Estimator():
         mass_norminal = self.masses_np
         _w1, _h1 = self.massesCenter_np.shape
         _w2, _h2 = self.Inertia_np.shape
-        mass_center_norminal = self.massesCenter_np.reshape(-1,_w1*_h1).flatten()
-        intertia_norminal = self.Inertia_np.reshape(-1,_w2*_h2).flatten()
+        mass_center_norminal = self.massesCenter_np.reshape(-1, _w1*_h1).flatten()
+        intertia_norminal = self.Inertia_np.reshape(-1, _w2*_h2).flatten()
         gt_x0 = Estimator.get_gt_params_sim(mass_norminal, mass_center_norminal, intertia_norminal, nj)
         return gt_x0
 
@@ -368,9 +340,9 @@ class Estimator():
         nj = len(positions[0])
         # 获取动力学参数独立矩阵
         Pb, Pd, Kd = find_dyn_parm_deps(7, 80, self.Ymat)
-        # 由Y*Pd = Y*Pb*Kd
+        # 由Y*Pd = Y*Pb*Kd推导得到，K左乘完整惯性参数可以得到最小参数集
         K = Pb.T + Kd @ Pd.T
-        # 根据位置、速度、加速度，计算回归矩阵、关节力矩向量、摩擦参数回归矩阵
+        # 根据位置、速度、关节力矩，计算回归矩阵、关节力矩向量、摩擦参数回归矩阵
         Y_r, taus1, Y_fri1 = self.get_Yb_matrix(positions, velocities, efforts, Pb)
         print("self.masses_np = ", self.masses_np)
         _w1, _h1 = self.massesCenter_np.shape
@@ -386,29 +358,29 @@ class Estimator():
         # 生成待辨识参数符号向量
         _estimate = cs.SX.sym('para', l)
         # 把待优化的物理参数转换成最小动力学参数
-        estimate_cs = K @ self.PIvector(_estimate[0:_w0], _estimate[_w0:l1].reshape((_w1,_h1)), _estimate[l1:l2].reshape((_w2,_h2)))
+        estimate_cs = K @ self.PIvector(_estimate[0:_w0], _estimate[_w0:l1].reshape((_w1, _h1)), _estimate[l1:l2].reshape((_w2, _h2)))
         # 定义参数辨识的目标函数，包括力矩拟合误差物理参数正则化两部分
-        obj = cs.sumsqr(taus1 - Y_r @ estimate_cs - Y_fri1 @ _estimate[-nj*2:]) 
-        + 10.0*cs.norm_2(_estimate[:_w0]) + 100.0*cs.norm_2(_estimate[_w0:l1]) + 100.0*cs.norm_2(_estimate[l1:l2])
+        obj = cs.sumsqr(taus1 - Y_r @ estimate_cs - Y_fri1 @ _estimate[-nj*2:])                                    # 实际力矩、减去估计力矩、减去摩擦力
+        + 10.0*cs.norm_2(_estimate[:_w0]) + 100.0*cs.norm_2(_estimate[_w0:l1]) + 100.0*cs.norm_2(_estimate[l1:l2]) # 参数正则化部分
         # 为待辨识参数生成约束表达式、约束下界、约束上界
         ineq_constr, constraint_lb, constraint_ub = Estimator.build_ineq_physical_con(_estimate, _w0, _w1, _h1, _w2, _h2)
         problem = {'x': _estimate, 'f': obj, 'g': cs.vertcat(*ineq_constr)}
         opts = {
             'ipopt': {
                 'max_iter': 5000,                  # 最大迭代次数
-                'tol': 1e-10,                      # 容忍度
+                'tol': 1e-10,                      # 总体收敛容差
                 'constr_viol_tol': 1e-9,           # 约束违反容差
                 'compl_inf_tol': 1e-9,             # 互补性条件容差
-                'acceptable_tol': 1e-8,            # 可接受容忍度
-                'acceptable_iter': 20,             # 可接受最大迭代次数
+                'acceptable_tol': 1e-8,            # 可接受解容差
+                'acceptable_iter': 20,             # 迭代满当前次数后，如果满足可接受解容差，结束迭代
                 'linear_solver': 'mumps',          # 求解器
                 'mu_strategy': 'adaptive',         # 策略
                 'dual_inf_tol': 1e-10,             # 对偶可行性容忍度
                 'compl_inf_tol': 1e-10,            # 互补性容忍度
                 'bound_relax_factor': 0,           # 防止约束松弛
-                'hessian_approximation': 'exact',  # 使用精确的 Hessian，不使用近似
+                'hessian_approximation': 'exact',  # 使用精确的Hessian，不使用近似
             },
-            'verbose': False,  # 如果需要调试信息，可以设置为True
+            'verbose': False,                      # 如果需要调试信息，可以设置为True
         }
         # 创建求解器
         solver = cs.nlpsol('S', 'ipopt', problem, opts)
@@ -441,14 +413,8 @@ class Estimator():
         taus = []
         Y_ = []
         Y_fri = []
-        # init_para = np.random.uniform(0.0, 0.1, size=50)
-        # filter_list = [TD_2order(T=0.01) for i in range(7)]
-        # filter_vector = TD_list_filter(T=0.01)
         for k in range(1, len(positions)):
-            # print("q_np = {0}".format(q_np))
-            # q_np = np.random.uniform(-1.5, 1.5, size=7)
             q_np = [positions[k][i] for i in Order]
-            # print("velocities[k] = {0}".format(velocities[k]))
             qd_np = [velocities[k][i] for i in Order]
             tau_ext = [efforts[k][i] for i in Order]
             qdlast_np = [velocities[k-1][i] for i in Order]
@@ -490,7 +456,6 @@ class Estimator():
         ineq_constr = [estimate_cs[i] >= lb[i] for i in range(pa_size)] + [estimate_cs[i] <= ub[i] for i in range(pa_size)]
 
         problem = {'x': estimate_cs, 'f': obj, 'g': cs.vertcat(*ineq_constr)}
-        # solver = cs.qpsol('solver', 'qpoases', problem)
         solver = cs.nlpsol('S', 'ipopt', problem,{'ipopt':{'max_iter':3000000 }, 'verbose':True})
         print("solver = {0}".format(solver))
         sol = solver()
@@ -511,26 +476,27 @@ class Estimator():
         _w0 = len(self.masses_np)
         l = _w0 + _h1*_w1 + _w2 * _h2
         l1 = _w0 + _w1*_h1
-        # _estimate = cs.SX.sym('para', l)
+        # 构造最小惯性参数集
         estimate_cs = K @ self.PIvector(para[0:_w0], para[_w0:l1].reshape((_w1,_h1)), para[l1:l].reshape((_w2,_h2)))
         estimate_gt = K @ self.PIvector(para_gt[0:_w0], para_gt[_w0:l1].reshape((_w1,_h1)), para_gt[l1:l].reshape((_w2,_h2)))
         for k in range(1,len(positions),1):
             q_np = [positions[k][i] for i in Order]
             qd_np = [velocities[k][i] for i in Order]
-            # tau_ext = [efforts[k][i] for i in Order]
             qdlast_np = [velocities[k-1][i] for i in Order]
-            qdd_np = (np.array(qd_np)-np.array(qdlast_np))/0.01#(velocities[k][0]-velocities[k-1][0])
-            # qdd_np = [f(qd_np[id])[1] for id,f in enumerate(filter_list)]
+            qdd_np = (np.array(qd_np) - np.array(qdlast_np))/0.01
             pa_size = Pb.shape[1]
-            tau_est_model = (self.Ymat(q_np,qd_np,qdd_np) @Pb@  estimate_cs + np.diag(np.sign(qd_np)) @ para[-2*len(qd_np):-len(qd_np)] + np.diag(qd_np) @ para[-len(qd_np):])
-            tau_ext = (self.Ymat(q_np,qd_np,qdd_np) @Pb@  estimate_gt + np.diag(np.sign(qd_np)) @ para_gt[-2*len(qd_np):-len(qd_np)] + np.diag(qd_np) @ para_gt[-len(qd_np):])
-            # tau_est_model = (self.Ymat(q_np,qd_np,qdd_np) @Pb@  estimate_cs )
-            e= tau_est_model - tau_ext 
+            # 由模型计算各个关节的力矩
+            tau_est_model = (self.Ymat(q_np, qd_np, qdd_np) @ Pb @ estimate_cs 
+                             + np.diag(np.sign(qd_np)) @ para[-2*len(qd_np):-len(qd_np)] 
+                             + np.diag(qd_np) @ para[-len(qd_np):])
+            tau_ext = (self.Ymat(q_np, qd_np, qdd_np) @ Pb @ estimate_gt 
+                       + np.diag(np.sign(qd_np)) @ para_gt[-2*len(qd_np):-len(qd_np)] 
+                       + np.diag(qd_np) @ para_gt[-len(qd_np):])
+            # 计算差值
+            e = tau_est_model - tau_ext 
             print("sim_tau = {0}".format(tau_ext))
             print("tau_est_model = {0}".format(tau_est_model))
             print("sim_tau 2 = {0}".format(self.dynamics_(q_np,qd_np, qdd_np, self.masses_np, para_gt[_w0:l1].reshape((_w1,_h1)), para_gt[l1:l].reshape((_w2,_h2)))))
-            # print("tau_error = {0}".format(e))
-            # print("q_np = {0}".format(q_np))
             tau_ests.append(tau_est_model.toarray().flatten().tolist())
             es.append(e.toarray().flatten().tolist())
             tau_exts.append(tau_ext.toarray().flatten().tolist())
@@ -585,28 +551,14 @@ class Estimator():
         # 使用二阶低通滤波器对速度进行滤波
         filter_list = [TD_2order(T=0.01) for i in range(7)]
         for k in range(1,len(positions),1):
-            # q_np = positions[k][4,1,2,3,5,6,7]
-            # qd_np = velocities[k][4,1,2,3,5,6,7]
-            # tau_ext = efforts[k][4,1,2,3,5,6,7]
-            # qdd_np = (np.array(velocities[k][4,1,2,3,5,6,7])-np.array(velocities[k-1][4,1,2,3,5,6,7]))/(velocities[k][0]-velocities[k-1][0])
-            # qdd_np = qdd_np.tolist()
             q_np = [positions[k][i] for i in Order]
             qd_np = [velocities[k][i] for i in Order]
             tau_ext = [efforts[k][i] for i in Order]
             qdlast_np = [velocities[k-1][i] for i in Order]
-            qdd_np = (np.array(qd_np) - np.array(qdlast_np))/0.01   #(velocities[k][0]-velocities[k-1][0])
-            # qdd_np = qdd_np.tolist()
-            # qdd_np = (np.array(qd_np)-np.array(qdlast_np))/0.01
-            # qdd_np = qdd_np.tolist()
+            qdd_np = (np.array(qd_np) - np.array(qdlast_np))/0.01   
             qdd_np = [f(qd_np[id])[1] for id, f in enumerate(filter_list)]
-            # tau_ext = self.robot.rnea(q_np,qd_np,qdd_np)
-            # e=self.Ymat(q_np,qd_np,qdd_np)@Pb @ (solution[f"{self.pam_name}/y"] -  K @real_pam)
-            # print("error = {0}".format(e))
-            # e=self.Ymat(q_np,qd_np,qdd_np)@Pb @  para - tau_ext 
             pa_size = Pb.shape[1]
             tau_est_model = (self.Ymat(q_np,qd_np,qdd_np) @Pb@  para[:pa_size] + np.diag(np.sign(qd_np)) @ para[pa_size:pa_size+7] + np.diag(qd_np) @ para[pa_size+7:])
-            # without friction
-            # tau_est_model = (self.Ymat(q_np,qd_np,qdd_np) @Pb@  para[:pa_size] )
             e= tau_est_model - tau_ext 
             print("error1 = {0}".format(e))
             print("tau_ext = {0}".format(tau_ext))

@@ -1,28 +1,4 @@
 #!/usr/bin/python3
-"""辨识激励轨迹生成器。
-
-本模块用有限阶 Fourier 级数表示关节轨迹，以堆叠动力学回归矩阵的
-信息量为优化目标，并同时施加关节运动范围和近似自碰撞约束。
-
-主要数据流：URDF/Xacro -> RNEA 与回归矩阵 -> Fourier 轨迹 q/qd/qdd
--> 信息矩阵 Y.T@Y -> IPOPT 优化 Fourier 系数 -> CSV 轨迹。
-
-符号约定：
-    n: 机器人自由度，当前多数代码固定 n=7。
-    R: Fourier 阶数 Rank，当前多数代码固定 R=5。
-    N: 一个周期内参与优化的离散采样点数，N=sampling_rate/Ff。
-    p: 最小惯性参数和摩擦参数的总数。
-    Y: 堆叠观测矩阵，形状约为 (N*n, p)。
-    A: 信息矩阵 Y.T@Y，轨迹设计试图使其远离奇异。
-
-类之间的职责：
-    FourierSeries          只描述 q(t) 的数学形式。
-    TrajGeneration         加载模型、构造约束和求解优化问题。
-    TrajGenerationUsrPath  允许绕过默认 ROS 模型路径，直接指定模型文件。
-
-注意：当前实现的大部分维度仍按 7 自由度、5 阶 Fourier 级数编写。
-"""
-
 import optas
 import sys
 import numpy as np
@@ -41,7 +17,6 @@ from rclpy.node import Node
 import csv
 
 import pathlib
-
 import urdf_parser_py.urdf as urdf
 import math
 import copy
@@ -212,7 +187,9 @@ class TrajGeneration(Node):
         return pos_l, vel_l, tau_ext_l
     
     # 生成优化轨迹，返回Fourier系数a、b和信息矩阵函数fc
-    def generate_opt_traj_Link(self, Ff, sampling_rate, Rank=5, q_min=-2.0*np.ones(7), q_max =2.0*np.ones(7), q_vmin=-8.0*np.ones(7),q_vmax=8.0*np.ones(7), f_path = None, g_path=None,bias=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]):
+    def generate_opt_traj_Link(self, Ff, sampling_rate, Rank=5, q_min=-2.0*np.ones(7), q_max =2.0*np.ones(7), 
+                               q_vmin=-8.0*np.ones(7), q_vmax=8.0*np.ones(7), 
+                               f_path = None, g_path=None,bias=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]):
         warnings.warn("The 'deprecated_method' is deprecated and will be removed in a future version.", DeprecationWarning, stacklevel=2 )
         # 输出: Pb:选择线性独立列的矩阵 Pd:选择依赖列的矩阵 Kd:依赖列相对于独立列的系数(满足关系 Z*Pd = Z*Pb*Kd，Z为观测矩阵)
         Pb, Pd, Kd = find_dyn_parm_deps(7, 80, self.Ymat)
@@ -226,12 +203,12 @@ class TrajGeneration(Node):
         b = cs.SX.sym('b', Rank, 7)
         t = cs.SX.sym('t', 1)
         # 生成符号函数表示的傅立叶函数
-        fourierF = fourierInstance.FourierFunction(t, a, b,'f1')
+        fourierF = fourierInstance.FourierFunction(t, a, b, 'f1')
         # 生成符号变量表示的傅立叶函数数值结果
         fourier = fourierF(a, b, t)
         # 计算符号表示的傅立叶级数轨迹的数值速度和数值加速度
-        fourierDot = [optas.jacobian(fourier[i],t) for i in range(len(fourier))]
-        fourierDDot = [optas.jacobian(fourierDot[i],t) for i in range(len(fourierDot))]
+        fourierDot = [optas.jacobian(fourier[i], t) for i in range(len(fourier))]
+        fourierDDot = [optas.jacobian(fourierDot[i], t) for i in range(len(fourierDot))]
         print(fourierDot)
         path_pos = os.path.join(get_package_share_directory("med7_dock_description"), "meshes", "EndEffector.STL", )
         # 用末端STL的凸包点代表末端几何体
@@ -259,7 +236,7 @@ class TrajGeneration(Node):
             qdd = cs.vertcat(*qdd_list)
             # 单个时刻的块有7行；乘Pb保留基本惯性参数列
             Y_temp = self.Ymat(q, qd, qdd) @ Pb
-            # 摩擦模型 tau_f = Fc*sign(qd) + Fv*qd
+            # 摩擦模型: tau_f = Fc*sign(qd) + Fv*qd
             fri_ = cs.diag(cs.sign(qd))
             fri_ = cs.horzcat(fri_,  cs.diag(qd))
             for j in range(len(vfs_fun)):
