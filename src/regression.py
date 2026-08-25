@@ -359,11 +359,12 @@ class Estimator():
         _estimate = cs.SX.sym('para', l)
         # 把待优化的物理参数转换成最小动力学参数
         estimate_cs = K @ self.PIvector(_estimate[0:_w0], _estimate[_w0:l1].reshape((_w1, _h1)), _estimate[l1:l2].reshape((_w2, _h2)))
-        # 定义参数辨识的目标函数，包括力矩拟合误差物理参数正则化两部分
+        # 定义参数辨识的目标函数，包括力矩拟合误差平方和，物理参数正则化两部分，
         obj = cs.sumsqr(taus1 - Y_r @ estimate_cs - Y_fri1 @ _estimate[-nj*2:])                                    # 实际力矩、减去估计力矩、减去摩擦力
         + 10.0*cs.norm_2(_estimate[:_w0]) + 100.0*cs.norm_2(_estimate[_w0:l1]) + 100.0*cs.norm_2(_estimate[l1:l2]) # 参数正则化部分
         # 为待辨识参数生成约束表达式、约束下界、约束上界
         ineq_constr, constraint_lb, constraint_ub = Estimator.build_ineq_physical_con(_estimate, _w0, _w1, _h1, _w2, _h2)
+        # 优化问题: x 决策变量，f 要最小化的标量目标函数，g 约束表达式
         problem = {'x': _estimate, 'f': obj, 'g': cs.vertcat(*ineq_constr)}
         opts = {
             'ipopt': {
@@ -382,7 +383,7 @@ class Estimator():
             },
             'verbose': False,                      # 如果需要调试信息，可以设置为True
         }
-        # 创建求解器
+        # 创建求解器: S 名称，ipopt 求解后端，problem 优化问题，opts 配置
         solver = cs.nlpsol('S', 'ipopt', problem, opts)
         print("solver = {0}".format(solver))
         # 整理名义动力学参数
@@ -398,7 +399,7 @@ class Estimator():
         + (intertia_norminal * np.random.uniform(0.0, 2.0, size = intertia_norminal.shape)).tolist()
         + [random.random() * 1.0 for _ in range(nj)] 
         + [random.random() * 1.0 for _ in range(nj)]
-        # 求解
+        # 求解优化问题，要满足 lbg <= g(x) <= ubg 和 lbx <= x <= ubx
         sol = solver(x0 = init_x0, lbg = constraint_lb, ubg = constraint_ub)
         stats = solver.stats()
         if not stats.get('success', False):
