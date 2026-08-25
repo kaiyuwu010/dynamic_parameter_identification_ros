@@ -35,7 +35,7 @@ def contains_nan(x):
             return True
     return False
 
-# 将二维列表保存为 CSV 文件
+# 将二维列表保存为CSV文件
 def save_to_csv(values_list, filename):
     directory = os.path.dirname(filename)
     if not os.path.exists(directory):
@@ -45,7 +45,7 @@ def save_to_csv(values_list, filename):
         writer.writerows(values_list)
     print(f"Data saved to {filename}")
 
-# 从不带表头的 CSV 中读取浮点数二维列表
+# 从不带表头的CSV中读取浮点数二维列表
 def load_from_csv(filename):
     with open(filename, mode='r') as file:
         reader = csv.reader(file)
@@ -53,7 +53,9 @@ def load_from_csv(filename):
     return loaded_list
 
 # 在关节空间中建立避碰约束
-def getConstraintsinJointSpace(robot, point_coord = [0.]*3, Nb=7, base_link="link_3", base_joint_name="A3", 
+def getConstraintsinJointSpace(robot, point_coord = [0.]*3, Nb=7, 
+                               base_link="link_3", 
+                               base_joint_name="A3", 
                                ee_link="link_ee"):
     # 定义符号关节变量
     q = cs.SX.sym('q', Nb, 1)
@@ -68,10 +70,9 @@ def getConstraintsinJointSpace(robot, point_coord = [0.]*3, Nb=7, base_link="lin
     # 获取待避碰连杆的关节原点作为椭球中心
     robot_urdf = robot.urdf
     joint = robot_urdf.joint_map[base_joint_name]
+    # 获取目标关节坐标系原点在父关节坐标系的位置向量
     xyz, _ = robot.get_joint_origin(joint)
     print("robot_urdf.joint_map = ",robot_urdf.joint_map)
-    # 定义椭球边界框
-    bbox = cs.DM([0.2, 0.2, xyz[2]])
     # 再把凸包点表示到待避碰连杆的局部坐标系中
     p = Rb.T@(pp -pb)
     x= p[0]
@@ -81,7 +82,7 @@ def getConstraintsinJointSpace(robot, point_coord = [0.]*3, Nb=7, base_link="lin
     c = xyz[2]
     c = c/2
     if(c==0):
-        c= 0.2
+        c = 0.2
     # 椭球长轴和短轴
     a = 0.15
     b = 0.15
@@ -192,13 +193,14 @@ class TrajGeneration(Node):
                                Rank=5, 
                                q_min=-2.0*np.ones(7), q_max =2.0*np.ones(7), 
                                q_vmin=-8.0*np.ones(7), q_vmax=8.0*np.ones(7), 
-                               f_path = None, g_path=None, bias=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]):
+                               f_path = None, g_path=None, 
+                               bias=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]):
         warnings.warn("The 'deprecated_method' is deprecated and will be removed in a future version.", DeprecationWarning, stacklevel=2 )
         # 输出: Pb:选择线性独立列的矩阵 Pd:选择依赖列的矩阵 Kd:依赖列相对于独立列的系数(满足关系 Y*Pd = Y*Pb*Kd，Y为观测矩阵)
         Pb, Pd, Kd = find_dyn_parm_deps(7, 80, self.Ymat)
         # 计算一个周期内的样本数
         pointsNum = int(sampling_rate/(Ff))
-        print("pointsNum", pointsNum)
+        print("一个周期内的样本数: ", pointsNum)
         # 计算Fourier系数对应的符号函数
         fourierInstance = FourierSeries(ff = Ff, bias = bias)
         # 定义符号变量a、b和时间t
@@ -213,15 +215,32 @@ class TrajGeneration(Node):
         fourierDot = [optas.jacobian(fourier[i], t) for i in range(len(fourier))]
         fourierDDot = [optas.jacobian(fourierDot[i], t) for i in range(len(fourierDot))]
         print(fourierDot)
-        path_pos = os.path.join(get_package_share_directory("med7_dock_description"), "meshes", "EndEffector.STL", )
+        # path_pos = os.path.join(get_package_share_directory("med7_dock_description"), "meshes", "EndEffector.STL", )
+        # path_pos = os.path.join(get_package_share_directory("xarm_description"), "meshes", "xarm7", "visual", "link7.stl", )
         # 用末端STL的凸包点代表末端几何体
-        points = get_convex_hull(path_pos)
-        print("points", points)
+        # points = get_convex_hull(path_pos)
+        # ============================ 自定义凸包点 ============================
+        r = 0.06
+        h = 0.10
+        points = np.array([
+            [0.0, 0.0, 0.0],
+            [ r,  r, 0.0],
+            [ r, -r, 0.0],
+            [-r,  r, 0.0],
+            [-r, -r, 0.0],
+            [ r,  r, h],
+            [ r, -r, h],
+            [-r,  r, h],
+            [-r, -r, h],
+        ])
+        points = np.empty((0, 3))
+        # ====================================================================
+        print("凸包点: ", points)
         vfs_fun = []
         # 每个凸包点分别对link_2到link_5建立椭球外部约束
         for point in points:
             for i in range(2, 6): # i分别取2...5
-                vfs_fun.append(getConstraintsinJointSpace(self.robot, point_coord=point, base_link="link_"+str(i), base_joint_name="A"+str(i) ))
+                vfs_fun.append(getConstraintsinJointSpace(self.robot, point_coord = point, base_link = "link_"+str(i), base_joint_name = "A"+str(i) ))
         # 初始化回归矩阵变量
         Y_ = []
         Y_fri = []
@@ -241,10 +260,10 @@ class TrajGeneration(Node):
             Y_temp = self.Ymat(q, qd, qdd) @ Pb     # 7行矩阵
             # 摩擦模型: tau_f = Fc*sign(qd) + Fv*qd
             fri_ = cs.diag(cs.sign(qd))             # 把关节速度符号生成对角线矩阵
-            fri_ = cs.horzcat(fri_,  cs.diag(qd))   # 把符号对角线矩阵和关节速度对角线矩阵拼接到一起，7行
+            fri_ = cs.horzcat(fri_, cs.diag(qd))   # 把符号对角线矩阵和关节速度对角线矩阵拼接到一起，7行
             for j in range(len(vfs_fun)):
                 pfun_list.append(vfs_fun[j](q))
-            # print("pfun_list = ",pfun_list)
+            # print("pfun_list = ", pfun_list)
             Y_.append(Y_temp)
             Y_fri.append(fri_)
         # 沿竖直方向堆叠所有时刻形成整个轨迹的观测矩阵
@@ -260,21 +279,18 @@ class TrajGeneration(Node):
         # 不等式约束
         ab_sq_ineq1 = [0.0]*7
         ab_sq_ineq2 = [0.0]*7
-        ab_sq_ineq3 = []
         # lbg表示约束的下界
         lbg1 = []
         lbg2 = []
         lbg3 = []
         lbg4 = []
         lbg5 = []
-        lbg6 = []
         # ubg表示约束的上界
         ubg1 = []
         ubg2 = []
         ubg3 = []
         ubg4 = []
         ubg5 = []
-        ubg6 = []
         # 为每个关节构造周期和幅值约束
         for i in range(7): # 从0到6遍历每个关节
             for l in range(5): # 从0到4遍历五次谐波
@@ -287,16 +303,6 @@ class TrajGeneration(Node):
                 ab_sq_ineq1[i] = (ab_sq_ineq1[i] + 1.0/(wl) * cs.sqrt(a[l,i] * a[l,i] + b[l,i] * b[l,i]))
                 # 各谐波速度幅值之和，是整个周期速度偏移的上界: 速度幅值公式 sqrt(a²+b²)
                 ab_sq_ineq2[i] = (ab_sq_ineq2[i] + cs.sqrt(a[l,i] * a[l,i] + b[l,i] * b[l,i]))
-                # 单独限制每个a、b系数
-                ab_sq_ineq3.append(a[l,i])
-                ab_sq_ineq3.append(b[l,i])
-                # a、b系数的上下界
-                cpr2 = min((l+1) * Ff/5.0 * 2.0*math.pi * q_max[i], q_vmax[i])  # 可以表达为 min(wl * q_max[i] / Rank, q_vmax[i])，每阶谐波位置
-                cpr = max((l+1) * Ff/5.0 * 2.0*math.pi * q_min[i], q_vmin[i])   # 可以表达为 max(wl * q_min[i] / Rank, q_vmin[i])，每阶谐波位置
-                lbg6.append(cpr)
-                lbg6.append(cpr)
-                ubg6.append(cpr2)
-                ubg6.append(cpr2)
             lbg1.append(0.0)
             lbg2.append(0.0)
             lbg3.append(0.0)
@@ -308,21 +314,21 @@ class TrajGeneration(Node):
             ubg4.append(q_max[i])
             ubg5.append(q_vmax[i])
         # 约束表达式和上下界按顺序拼接，形成单个向量g、lbg、ubg
-        g = cs.simplify(cs.vertcat(*(a_eq1 + a_eq2 + b_eq1 + ab_sq_ineq1 + ab_sq_ineq2 + ab_sq_ineq3 + pfun_list)))
+        g = cs.simplify(cs.vertcat(*(a_eq1 + a_eq2 + b_eq1 + ab_sq_ineq1 + ab_sq_ineq2 + pfun_list)))
         # 约束表达式下界
-        lbg = cs.vertcat(*(lbg1, lbg2, lbg3, lbg4, lbg5, lbg6, [-1.0]*len(pfun_list)))
+        lbg = cs.vertcat(*(lbg1, lbg2, lbg3, lbg4, lbg5, [-1.0]*len(pfun_list)))
         # 约束表达式上界
-        ubg = cs.vertcat(*(ubg1, ubg2, ubg3, ubg4, ubg5, ubg6, [1e10]*len(pfun_list)))
+        ubg = cs.vertcat(*(ubg1, ubg2, ubg3, ubg4, ubg5, [1e10]*len(pfun_list)))
         # A矩阵是信息矩阵，指标着轨迹对参数的辨识能力，A越接近奇异，参数估计的方差就越大
         A = Y.T @ Y
-        A_inv = cs.inv(A)
+        reg = 1e-6
+        A_reg = A + reg * cs.DM.eye(A.size1())
+        A_inv = cs.inv(A_reg)
         # f1是Frobenius条件数，越小通常表示参数方向激励越均衡
-        f1 = cs.simplify(1.0*cs.norm_fro(A) * cs.norm_fro(A_inv))
-        f = cs.simplify(1.0*cs.norm_fro(A) + cs.norm_fro(A_inv))
+        f1 = cs.norm_fro(A_reg) * cs.norm_fro(A_inv)
         # 合并a、b重排成包含2*Rank*7个元素的行向量
         x = cs.reshape(cs.vertcat(a, b), (1, 2*Rank*7))
-        fc = optas.Function('fc', [a, b], [A])
-        f_fun = optas.Function('ff', [a, b], [f])
+        fc = optas.Function('fc', [a, b], [A_reg])
         g_fun = optas.Function('gf', [a, b], [g])
         # 初始化一些优化参数
         G_max = 1
@@ -346,7 +352,6 @@ class TrajGeneration(Node):
         print("b_eq1 = ", len(b_eq1))
         print("ab_sq_ineq1 = ", len(ab_sq_ineq1))
         print("ab_sq_ineq2 = ", len(ab_sq_ineq2))
-        print("ab_sq_ineq3 = ", len(ab_sq_ineq3))
         # 多起点搜索：先随机寻找满足边界的初值，再交给IPOPT局部优化。
         for iter in range(G_max):
             # 随机寻找满足边界的初值
@@ -368,15 +373,17 @@ class TrajGeneration(Node):
             # 将优化结果拆分为a、b两个矩阵
             a_, b_ =  cs.vertsplit(cs.reshape(sol['x'], (2*Rank, 7)), Rank)
             # 计算信息矩阵的特征值
-            eigenvalues, eigenvectors = np.linalg.eig(fc(a_, b_))
-            print("fc = ",eigenvalues)
-            print("a = {0} \n b = {1}".format(a,b))
+            eigenvalues = np.linalg.eigvalsh(fc(a_, b_))
+            lambda_min = np.min(eigenvalues)
+            lambda_max = np.max(eigenvalues)
+            print("特征值为: ", eigenvalues)
+            print("对应的傅立叶系数为: \n a = {0} \n b = {1}".format(a, b))
             # 计算最大/最小特征值比作为条件数指标
-            values_f = np.sqrt(eigenvalues[0]/np.abs(eigenvalues[-1]))
-            print("values_f = ",values_f)
+            values_f = np.sqrt(lambda_max / lambda_min)
+            print("条件数为: ", values_f)
             # 如果当前解的条件数比之前最优解更好，则更新最优解
             if values_f_min > values_f:
-                print(" find a better value = {0}".format(values_f))
+                print(" 找到了更好的条件数: {0}".format(values_f))
                 _x0_best = sol['x']
                 values_f_min = values_f
                 if (values_f < 1000):
@@ -1014,7 +1021,8 @@ def mainO(args=None):
     Ff = 0.1
     sampling_rate = 100.0
     # 优化阶段降采样以减小符号图，导出阶段再提高到100Hz
-    sampling_rate_inoptimization = 20.0
+    # sampling_rate_inoptimization = 20.0
+    sampling_rate_inoptimization = 2.0
     a,b,fc = paraEstimator.generate_opt_traj_Link(Ff = Ff, sampling_rate = sampling_rate_inoptimization, 
                                                   bias = [0, 0, 0.0, 0.0, 0.0, 1.0, 0.0],
                                                   q_min=[-6.2, -12.0, -16.2, -10.19, -16.2, -11.69, -16.2],
