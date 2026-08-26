@@ -113,11 +113,10 @@ def RNEA_function(Nb, Nk, rpys, xyzs, axes, gravity_para = cs.DM([0, 0, -9.81]))
         if(i != Nf-1):
             # 计算i-1相对i的旋转矩阵
             iRp = (rpy2r(rpys[i]) @ angvec2r(q[i], axes[i])).T
-            iaxisi = iRp @ axes[i]
             # 计算连杆i的角速度: 上个连杆的角速度 + 当前连杆绕关节的旋转角速度
-            omi = iRp @ oms[i] + iaxisi * qd[i]
+            omi = iRp @ oms[i] + axes[i] * qd[i]
             # 计算连杆i的角加速度: 上个连杆的角加速度 + 上个连杆角速度 X 当前连杆角速度 + 当前关节的角加速度
-            omDi = iRp @ omDs[i] +  skew(iRp @ oms[i]) @ (iaxisi*qd[i]) + iaxisi*qdd[i]
+            omDi = iRp @ omDs[i] +  skew(iRp @ oms[i]) @ (axes[i]*qd[i]) + axes[i]*qdd[i]
         else:
             # 末端执行器没有可动关节，所以只有rpy
             iRp = rpy2r(rpys[i]).T
@@ -154,10 +153,8 @@ def RNEA_function(Nb, Nk, rpys, xyzs, axes, gravity_para = cs.DM([0, 0, -9.81]))
         ini = ns[i] + pRi @ ini + skew(cm[:, i-1]) @ fs[i] + skew(xyzs[i]) @ pRi @ ifi
         # 计算关节i-1施加给关节i的力: 惯性合力 + 当前关节施加给上个关节的力
         ifi = fs[i] + pRi @ ifi
-        # 计算i-1相对i-2的旋转矩阵
-        pRi = rpy2r(rpys[i-1]) @ angvec2r(q[i-1], axes[i-1])
         # 计算作用在旋转轴的力矩: 
-        _tau = ini.T @ pRi.T @ axes[i-1]
+        _tau = axes[i-1].T @ ini
         taus.append(_tau)
     tau_ = cs.vertcat(*[taus[k] for k in range(len(taus)-1, -1, -1)])
     dynamics_ = optas.Function('dynamics', [q, qd, qdd, m, cm, Icm], [tau_])
@@ -195,14 +192,14 @@ def DynamicLinearlization(dynamics_, Nb):
                 Y_line.append(output_cm1)
             # 提取惯性参数系数
             output2 = dynamics_(q, qd, qdd, m_indu, cm_indu, Icm)[i] - output # 只保留惯性项
-            o = 3 * j
+            l = 3 * j
             # 对第j个刚体的6个惯性参数求导，这里不包括二次项所以不用替换
-            Y_line.extend([optas.jacobian(output2, Icm[0, o]),                                           # Ixx
-                           optas.jacobian(output2, Icm[0, o+1]) + optas.jacobian(output2, Icm[1, o]),    # Ixy
-                           optas.jacobian(output2, Icm[0, o+2]) + optas.jacobian(output2, Icm[2, o]),    # Ixz 
-                           optas.jacobian(output2, Icm[1, o+1]),                                         # Iyy
-                           optas.jacobian(output2, Icm[1, o+2]) + optas.jacobian(output2, Icm[2, o+1]),  # Iyz 
-                           optas.jacobian(output2, Icm[2, o+2]),                                         # Izz
+            Y_line.extend([optas.jacobian(output2, Icm[0, l]),                                           # Ixx
+                           optas.jacobian(output2, Icm[0, l+1]) + optas.jacobian(output2, Icm[1, l]),    # Ixy
+                           optas.jacobian(output2, Icm[0, l+2]) + optas.jacobian(output2, Icm[2, l]),    # Ixz 
+                           optas.jacobian(output2, Icm[1, l+1]),                                         # Iyy
+                           optas.jacobian(output2, Icm[1, l+2]) + optas.jacobian(output2, Icm[2, l+1]),  # Iyz 
+                           optas.jacobian(output2, Icm[2, l+2]),                                         # Izz
             ])
         # 水平拼接为一行
         sx_lst = optas.horzcat(*Y_line)
@@ -310,7 +307,10 @@ def main():
     # 从urdf得到的惯性参数
     real_pam = PIvector(masses_np, massesCenter_np, Inertia_np)
     # 估计力矩
-    tau_est = (Ymat(q.tolist(), filter(qd.tolist())[0], filter(qd.tolist())[1]) @ Pb  @  params[:pa_size] + np.diag(np.sign(qd)) @ params[pa_size:pa_size+7] + np.diag(qdd) @ params[pa_size+7:])
+    tau_est = (Ymat(q.tolist(), 
+                    filter(qd.tolist())[0], 
+                    filter(qd.tolist())[1]) @ Pb  @  params[:pa_size] + 
+                    np.diag(np.sign(qd)) @ params[pa_size:pa_size+7] + np.diag(qd) @ params[pa_size+7:])
     print(" The estimated torque  tau_est = {0}".format(tau_est))
 
 if __name__ == "__main__":
