@@ -89,7 +89,7 @@ def ExtractFromParamsCsv(path):
 # xyzs[i]: 连杆i的原点相对连杆i-1的原点的平移，连杆0是第一个连杆不是root，大小为NfX3，(0、...、Nf-1)，包括末端刚体相对最后连杆的坐标系平移
 # axes[i]: 连杆i的旋转轴，连杆0是第一个连杆不是root，大小为NfX3，(0、...、Nf-1)，包括末端刚体相对最后连杆的连接轴
 # gravity_para: 基坐标系下的重力加速度
-def RNEA_function(Nb, Nk, rpys, xyzs, axes, gravity_para = cs.DM([4.905, 0.0, -8.496])):
+def RNEA_function(Nb, Nk, rpys, xyzs, axes, gravity_para = cs.DM([0, 0, -9.81])):
     Nf = Nb+Nk
     om0 = cs.DM([0.0,0.0,0.0])
     om0D = cs.DM([0.0,0.0,0.0])
@@ -195,11 +195,15 @@ def DynamicLinearlization(dynamics_, Nb):
                 Y_line.append(output_cm1)
             # 提取惯性参数系数
             output2 = dynamics_(q, qd, qdd, m_indu, cm_indu, Icm)[i] - output # 只保留惯性项
-            for k in range(3): # 0到2
-                for l in range(k, 3, 1): # K到2
-                    # 对第j个刚体的6个惯性参数求导，这里不包括二次项所以不用替换
-                    output_Icm = optas.jacobian(output2, Icm[k, l + 3*j])
-                    Y_line.append(output_Icm)
+            o = 3 * j
+            # 对第j个刚体的6个惯性参数求导，这里不包括二次项所以不用替换
+            Y_line.extend([optas.jacobian(output2, Icm[0, o]),                                           # Ixx
+                           optas.jacobian(output2, Icm[0, o+1]) + optas.jacobian(output2, Icm[1, o]),    # Ixy
+                           optas.jacobian(output2, Icm[0, o+2]) + optas.jacobian(output2, Icm[2, o]),    # Ixz 
+                           optas.jacobian(output2, Icm[1, o+1]),                                         # Iyy
+                           optas.jacobian(output2, Icm[1, o+2]) + optas.jacobian(output2, Icm[2, o+1]),  # Iyz 
+                           optas.jacobian(output2, Icm[2, o+2]),                                         # Izz
+            ])
         # 水平拼接为一行
         sx_lst = optas.horzcat(*Y_line)
         Y.append(sx_lst)

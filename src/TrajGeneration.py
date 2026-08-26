@@ -22,10 +22,9 @@ import math
 import copy
 from convexhallExtraction import get_convex_hull
 import random
-import warnings
 
 import casadi as cs
-from IDmodel import TD_2order, find_dyn_parm_deps, RNEA_function, DynamicLinearlization,getJointParametersfromURDF
+from IDmodel import find_dyn_parm_deps, RNEA_function, DynamicLinearlization, getJointParametersfromURDF
 
 # 检查数值或 CasADi 计算结果中是否包含 NaN
 def contains_nan(x):
@@ -122,7 +121,7 @@ class FourierSeries():
         return q
 
 class TrajGeneration(Node):
-    def __init__(self, node_name = "para_estimatior", dt_ = 5.0, N_ = 100, gravity_vector=[4.905, 0.0, -8.496]) -> None:
+    def __init__(self, node_name = "para_estimatior", dt_ = 5.0, N_ = 100, gravity_vector=[0, 0, -9.81]) -> None:
         super().__init__(node_name=node_name)
         self.declare_parameter("model", "med7")
         self.model_ = str(self.get_parameter("model").value)
@@ -188,214 +187,183 @@ class TrajGeneration(Node):
         return pos_l, vel_l, tau_ext_l
     
     # 生成优化轨迹，返回Fourier系数a、b和信息矩阵函数fc
-    def generate_opt_traj_Link(self, Ff,              # 傅立叶轨迹基频，单位hz
-                               sampling_rate,         # 采样频率，单位hz
-                               Rank=5, 
-                               q_min=-2.0*np.ones(7), q_max =2.0*np.ones(7), 
-                               q_vmin=-8.0*np.ones(7), q_vmax=8.0*np.ones(7), 
+    def generate_opt_traj_Link(self, Ff,                                              # 傅立叶轨迹基频，表示每秒几个周期，单位hz
+                               sampling_rate,                                         # 采样频率，表示每秒采集多少点，单位hz
+                               Rank=5,                                                # 傅立叶谐波阶次
+                               q_min = [-6.2, -6.2, -6.2, -6.2, -6.2, -6.2, -6.2],    # 关节范围下限，单位rad
+                               q_max = [ 6.2,  6.2,  6.2,  6.2,  6.2,  6.2,  6.2],    # 关节范围上限，单位rad 
+                               q_vmin = [-6.2, -6.2, -6.2, -6.2, -6.2, -6.2, -6.2],   # 关节速度下限，单位rad/s
+                               q_vmax = [ 6.2,  6.2,  6.2,  6.2,  6.2,  6.2,  6.2],   # 关节速度上限，单位rad/s
                                f_path = None, g_path=None, 
-                               bias=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]):
-        warnings.warn("The 'deprecated_method' is deprecated and will be removed in a future version.", DeprecationWarning, stacklevel=2 )
-        # 输出: Pb:选择线性独立列的矩阵 Pd:选择依赖列的矩阵 Kd:依赖列相对于独立列的系数(满足关系 Y*Pd = Y*Pb*Kd，Y为观测矩阵)
-        Pb, Pd, Kd = find_dyn_parm_deps(7, 80, self.Ymat)
-        # 计算一个周期内的样本数
-        pointsNum = int(sampling_rate/(Ff))
-        print("一个周期内的样本数: ", pointsNum)
-        # 计算Fourier系数对应的符号函数
-        fourierInstance = FourierSeries(ff = Ff, bias = bias)
-        # 定义符号变量a、b和时间t
-        a = cs.SX.sym('a', Rank, 7)
-        b = cs.SX.sym('b', Rank, 7)
-        t = cs.SX.sym('t', 1)
-        # 生成符号函数表示的傅立叶函数
-        fourierF = fourierInstance.FourierFunction(t, a, b, 'f1')
-        # 生成符号变量表示的傅立叶函数数值结果
-        fourier = fourierF(a, b, t)
-        # 计算符号表示的傅立叶级数轨迹的数值速度和数值加速度
-        fourierDot = [optas.jacobian(fourier[i], t) for i in range(len(fourier))]
-        fourierDDot = [optas.jacobian(fourierDot[i], t) for i in range(len(fourierDot))]
-        print(fourierDot)
-        # path_pos = os.path.join(get_package_share_directory("med7_dock_description"), "meshes", "EndEffector.STL", )
-        # path_pos = os.path.join(get_package_share_directory("xarm_description"), "meshes", "xarm7", "visual", "link7.stl", )
-        # 用末端STL的凸包点代表末端几何体
-        # points = get_convex_hull(path_pos)
-        # ============================ 自定义凸包点 ============================
-        r = 0.06
-        h = 0.10
-        points = np.array([
-            [0.0, 0.0, 0.0],
-            [ r,  r, 0.0],
-            [ r, -r, 0.0],
-            [-r,  r, 0.0],
-            [-r, -r, 0.0],
-            [ r,  r, h],
-            [ r, -r, h],
-            [-r,  r, h],
-            [-r, -r, h],
-        ])
+                               bias = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]):
+        # 输入检查
+        if Ff <= 0.0 or sampling_rate <= 0.0:
+            raise ValueError("Ff and sampling_rate must be positive")
+        if Rank < 2:
+            raise ValueError("Rank must be at least 2")
+        q_min = np.asarray(q_min, dtype=float)
+        q_max = np.asarray(q_max, dtype=float)
+        q_vmin = np.asarray(q_vmin, dtype=float)
+        q_vmax = np.asarray(q_vmax, dtype=float)
+        bias = np.asarray(bias, dtype=float)
+        for name, values in (("q_min", q_min), ("q_max", q_max), ("q_vmin", q_vmin), ("q_vmax", q_vmax), ("bias", bias),):
+            if values.shape != (7,):
+                raise ValueError(f"{name} must contain 7 values")
+        # 位置幅值约束
+        position_margins = np.minimum(q_max - bias, bias - q_min)
+        # 速度幅值约束
+        velocity_margins = np.minimum(q_vmax, -q_vmin)
+        if np.any(position_margins <= 0.0):
+            raise ValueError("bias must lie strictly inside every joint position bound")
+        if np.any(velocity_margins <= 0.0):
+            raise ValueError("joint velocity bounds must contain zero")
+        # 单周期采样点数
+        pointsNum = int(sampling_rate / Ff)
+        if pointsNum < 1:
+            raise ValueError("sampling_rate / Ff must be at least 1")
+        print("一个周期内的样本数:", pointsNum)
+        # 初始化傅立叶系数变量
+        x = cs.MX.sym('x', 2 * Rank * 7, 1)
+        ab = cs.reshape(x, 2 * Rank, 7)
+        a = ab[:Rank, :]
+        b = ab[Rank:, :]
+        # 求最小参数集提取矩阵
+        Pb, _, _ = find_dyn_parm_deps(7, 80, self.Ymat)
+        Pb = cs.DM(Pb)
+        bias_dm = cs.reshape(cs.DM(bias), 7, 1)
+        # 当前按你的要求关闭碰撞约束。将这里替换为非空点集即可恢复避碰项。
         points = np.empty((0, 3))
-        # ====================================================================
-        print("凸包点: ", points)
+        print("凸包点数:", len(points))
         vfs_fun = []
-        # 每个凸包点分别对link_2到link_5建立椭球外部约束
         for point in points:
-            for i in range(2, 6): # i分别取2...5
-                vfs_fun.append(getConstraintsinJointSpace(self.robot, point_coord = point, base_link = "link_"+str(i), base_joint_name = "A"+str(i) ))
-        # 初始化回归矩阵变量
-        Y_ = []
-        Y_fri = []
-        pfun_list = []
-        # 在一个周期内逐点计算q、qd、qdd，动力学回归块和避碰约束
-        for k in range(pointsNum):
-            tc = 1.0/(sampling_rate) * k
-            # 把符号t换成数值tc，采样符号表示的傅立叶级数轨迹的位置、速度、加速度数值
-            q_list = [optas.substitute(id, t, tc) for id in fourier]
-            qd_list = [optas.substitute(id, t, tc) for id in fourierDot] 
-            qdd_list = [optas.substitute(id, t, tc) for id in fourierDDot]
-            # 竖直堆叠
-            q = cs.vertcat(*q_list)
-            qd = cs.vertcat(*qd_list)
-            qdd = cs.vertcat(*qdd_list)
-            # 计算基本惯性参数列
-            Y_temp = self.Ymat(q, qd, qdd) @ Pb     # 7行矩阵
-            # 摩擦模型: tau_f = Fc*sign(qd) + Fv*qd
-            fri_ = cs.diag(cs.sign(qd))             # 把关节速度符号生成对角线矩阵
-            fri_ = cs.horzcat(fri_, cs.diag(qd))   # 把符号对角线矩阵和关节速度对角线矩阵拼接到一起，7行
-            for j in range(len(vfs_fun)):
-                pfun_list.append(vfs_fun[j](q))
-            # print("pfun_list = ", pfun_list)
-            Y_.append(Y_temp)
-            Y_fri.append(fri_)
-        # 沿竖直方向堆叠所有时刻形成整个轨迹的观测矩阵
-        Y_r = optas.vertcat(*Y_)
-        Y_fri1 = optas.vertcat(*Y_fri)
-        Y = Y_r
-        # Y = cs.horzcat(Y_r, Y_fri1)
-        # print(Y)
-        # 等式约束
-        a_eq1 = [0.0]*7
-        a_eq2 = [0.0]*7
-        b_eq1 = [0.0]*7
-        # 不等式约束
-        ab_sq_ineq1 = [0.0]*7
-        ab_sq_ineq2 = [0.0]*7
-        # lbg表示约束的下界
-        lbg1 = []
-        lbg2 = []
-        lbg3 = []
-        lbg4 = []
-        lbg5 = []
-        # ubg表示约束的上界
-        ubg1 = []
-        ubg2 = []
-        ubg3 = []
-        ubg4 = []
-        ubg5 = []
-        # 为每个关节构造周期和幅值约束
-        for i in range(7): # 从0到6遍历每个关节
-            for l in range(5): # 从0到4遍历五次谐波
-                # 三个等式约束用于限定周期连接处的位置、速度、加速度(t = 0的时候)
-                a_eq1[i] = a_eq1[i] + a[l,i]/(l+1)  # 叠加各个阶次a/l，
-                b_eq1[i] = b_eq1[i] + b[l,i]        # 叠加各个阶次b系数，
-                a_eq2[i] = a_eq2[i] + a[l,i]*(l+1)
-                # 各谐波位置幅值之和，是整个周期位置偏移的上界: 位置幅值公式 sqrt(a²+b²)/wl
-                wl = ((l+1) * Ff * math.pi * 2.0)   # 第l+1阶角频率，单位rad/s
-                ab_sq_ineq1[i] = (ab_sq_ineq1[i] + 1.0/(wl) * cs.sqrt(a[l,i] * a[l,i] + b[l,i] * b[l,i]))
-                # 各谐波速度幅值之和，是整个周期速度偏移的上界: 速度幅值公式 sqrt(a²+b²)
-                ab_sq_ineq2[i] = (ab_sq_ineq2[i] + cs.sqrt(a[l,i] * a[l,i] + b[l,i] * b[l,i]))
-            lbg1.append(0.0)
-            lbg2.append(0.0)
-            lbg3.append(0.0)
-            lbg4.append(0.0)
-            lbg5.append(0.0)
-            ubg1.append(0.0)
-            ubg2.append(0.0)
-            ubg3.append(0.0)
-            ubg4.append(q_max[i])
-            ubg5.append(q_vmax[i])
-        # 约束表达式和上下界按顺序拼接，形成单个向量g、lbg、ubg
-        g = cs.simplify(cs.vertcat(*(a_eq1 + a_eq2 + b_eq1 + ab_sq_ineq1 + ab_sq_ineq2 + pfun_list)))
-        # 约束表达式下界
-        lbg = cs.vertcat(*(lbg1, lbg2, lbg3, lbg4, lbg5, [-1.0]*len(pfun_list)))
-        # 约束表达式上界
-        ubg = cs.vertcat(*(ubg1, ubg2, ubg3, ubg4, ubg5, [1e10]*len(pfun_list)))
-        # A矩阵是信息矩阵，指标着轨迹对参数的辨识能力，A越接近奇异，参数估计的方差就越大
+            for link_index in range(2, 6):
+                vfs_fun.append(getConstraintsinJointSpace(self.robot, point_coord=point, base_link="link_" + str(link_index), base_joint_name="A" + str(link_index),))
+        Y_blocks = []  # 最小参数集对应的回归矩阵
+        pfun_list = [] # 各个采样点的碰撞约束
+        for sample_index in range(pointsNum):
+            tc = sample_index / sampling_rate
+            q = bias_dm
+            qd = cs.MX.zeros(7, 1)
+            qdd = cs.MX.zeros(7, 1)
+            for harmonic_index in range(Rank):
+                wl = (harmonic_index + 1) * 2.0 * math.pi * Ff
+                a_l = a[harmonic_index, :].T
+                b_l = b[harmonic_index, :].T
+                # 构造位置、速度、加速度符号向量
+                q = q + a_l / wl * math.sin(wl * tc) - b_l / wl * math.cos(wl * tc)
+                qd = qd + a_l * math.cos(wl * tc) + b_l * math.sin(wl * tc)
+                qdd = qdd - a_l * wl * math.sin(wl * tc) + b_l * wl * math.cos(wl * tc)
+            Y_blocks.append(self.Ymat(q, qd, qdd) @ Pb)
+            for vf_fun in vfs_fun:
+                pfun_list.append(vf_fun(q))
+        Y = cs.vertcat(*Y_blocks)
+        # 保留原有的三组线性周期条件及位置/速度幅值约束，只把表达式类型改为MX
+        a_eq1 = [0.0] * 7
+        a_eq2 = [0.0] * 7
+        b_eq1 = [0.0] * 7
+        position_amplitude = [0.0] * 7
+        velocity_amplitude = [0.0] * 7
+        for joint_index in range(7):
+            for harmonic_index in range(Rank):
+                order = harmonic_index + 1
+                wl = order * 2.0 * math.pi * Ff
+                a_value = a[harmonic_index, joint_index]
+                b_value = b[harmonic_index, joint_index]
+                a_eq1[joint_index] += b_value / order                       # t=0时的位置，q(0) = 0 
+                a_eq2[joint_index] += a_value                               # t=0时的速度，dotq(0) = 0
+                b_eq1[joint_index] += b_value * order                       # t=0时的加速度，ddotq(0) = 0 
+                amplitude = cs.sqrt(a_value * a_value + b_value * b_value)  # asinx - bcosx = sqrt{a^2+b^2}sin(x-&)，所以幅值最大为a^2+b^2
+                position_amplitude[joint_index] += amplitude / wl           # 位置幅值
+                velocity_amplitude[joint_index] += amplitude                # 速度幅值
+        # 约束和上下界
+        g = cs.vertcat(*(a_eq1 + a_eq2 + b_eq1 + position_amplitude + velocity_amplitude + pfun_list))
+        lbg = cs.DM([0.0] * (35 + len(pfun_list)))                                                                   # 矩阵形状(35 + n, 1)
+        ubg = cs.DM([0.0] * 21 + position_margins.tolist() + velocity_margins.tolist() + [1e10] * len(pfun_list))    # 矩阵形状(21 + p + v + n, 1)
+        # A_reg必须正定
         A = Y.T @ Y
-        reg = 1e-6
-        A_reg = A + reg * cs.DM.eye(A.size1())
-        A_inv = cs.inv(A_reg)
-        # f1是Frobenius条件数，越小通常表示参数方向激励越均衡
-        f1 = cs.norm_fro(A_reg) * cs.norm_fro(A_inv)
-        # 合并a、b重排成包含2*Rank*7个元素的行向量
-        x = cs.reshape(cs.vertcat(a, b), (1, 2*Rank*7))
-        fc = optas.Function('fc', [a, b], [A_reg])
-        g_fun = optas.Function('gf', [a, b], [g])
-        # 初始化一些优化参数
-        G_max = 1
-        values_f_min = 10e25
-        eps = 0.03
-        reject_sample = 100
-        # 定义求解问题，约束向量的上下界必须与g的顺序完全一致
-        problem = {'x': x,'f':f1, 'g': g}
-        # 创建求解器
-        S = cs.nlpsol('S', 'ipopt', problem, {'ipopt':{'max_iter':50000 }, 'verbose':False, "ipopt.hessian_approximation":"limited-memory"}) 
-        # 随机初始化a、b
-        _x0_best = None
-        x_sample_temp = eps* np.random.random(size = (1, 2*Rank*7))
-        init_x0 = copy.deepcopy(x_sample_temp)
-        a_init, b_init = np.split(x_sample_temp.reshape(2*Rank, 7), 2)
-        g_data = g_fun(a_init, b_init)
-        # 检测是否包含nan值
-        contains_nan(g_data)
-        print("a_eq1 = ", len(a_eq1))
-        print("a_eq2 = ", len(a_eq2))
-        print("b_eq1 = ", len(b_eq1))
-        print("ab_sq_ineq1 = ", len(ab_sq_ineq1))
-        print("ab_sq_ineq2 = ", len(ab_sq_ineq2))
-        # 多起点搜索：先随机寻找满足边界的初值，再交给IPOPT局部优化。
-        for iter in range(G_max):
-            # 随机寻找满足边界的初值
-            for num in range(reject_sample):
-                x_sample_temp = eps* np.random.random (size = (1, 2*Rank*7))
-                init_x0 = copy.deepcopy(x_sample_temp)
-                a_init, b_init =  np.split(x_sample_temp.reshape(2*Rank, 7), 2)
-                g_data = g_fun(a_init, b_init)
-                if(np.all(g_data < ubg) and np.all(g_data > lbg)):
-                    print("Find a initial solution here")
-                    break
-            init_x0 = copy.deepcopy(x_sample_temp)
-            # 将随机初值拆分为a、b两个矩阵
-            a_init, b_init =  np.split(x_sample_temp.reshape(2*Rank, 7), 2)
-            for k in range(1):
-                # 优化Fourier系数
-                sol = S(x0 = init_x0, lbg = lbg, ubg = ubg)
-                init_x0 = sol['x']
-            # 将优化结果拆分为a、b两个矩阵
-            a_, b_ =  cs.vertsplit(cs.reshape(sol['x'], (2*Rank, 7)), Rank)
-            # 计算信息矩阵的特征值
-            eigenvalues = np.linalg.eigvalsh(fc(a_, b_))
-            lambda_min = np.min(eigenvalues)
-            lambda_max = np.max(eigenvalues)
-            print("特征值为: ", eigenvalues)
-            print("对应的傅立叶系数为: \n a = {0} \n b = {1}".format(a, b))
-            # 计算最大/最小特征值比作为条件数指标
-            values_f = np.sqrt(lambda_max / lambda_min)
-            print("条件数为: ", values_f)
-            # 如果当前解的条件数比之前最优解更好，则更新最优解
-            if values_f_min > values_f:
-                print(" 找到了更好的条件数: {0}".format(values_f))
-                _x0_best = sol['x']
-                values_f_min = values_f
-                if (values_f < 1000):
-                    break
-        # 如果找到了最优解，则将其拆分为a、b并返回
-        if(_x0_best is not None):
-            x_split1, x_split2 = cs.vertsplit(cs.reshape(_x0_best, (2*Rank, 7)), Rank)
-            print("sol = {0}".format(_x0_best))
-        else:
-            print("Cannot finda a result!")
-            raise ValueError("Try another setup")
-        return x_split1.full(), x_split2.full(), fc
+        regularization = 1e-6
+        A_reg = A + regularization * cs.DM.eye(A.size1())
+        f = cs.norm_fro(A_reg) * cs.norm_fro(cs.solve(A_reg, cs.DM.eye(A.size1()))) # cs.solve比cs.inv更稳定
+        Y_x_fun = cs.Function('Y_x_fun', [x], [Y])          # 把计算回归矩阵Y的符号表达式封装为函数，输入傅立叶系数x
+        g_x_fun = cs.Function('g_x_fun', [x], [g])          # 把计算约束g的符号表达式封装为函数，输入傅立叶系数x
+        A_x_fun = cs.Function('A_x_fun', [x], [A_reg])      # 把计算信息矩阵A_reg的符号表达式封装为函数，输入傅立叶系数x
+        a_eval = cs.MX.sym('a_eval', Rank, 7)
+        b_eval = cs.MX.sym('b_eval', Rank, 7)
+        x_eval = cs.vec(cs.vertcat(a_eval, b_eval))
+        Y_fun = cs.Function('Y_fun', [a_eval, b_eval], [Y_x_fun(x_eval)])  # 把计算回归矩阵Y的符号表达式封装为函数，输入傅立叶系数a、b
+        fc = cs.Function('fc', [a_eval, b_eval], [A_x_fun(x_eval)])        # 把计算信息矩阵A_reg的符号表达式封装为函数，输入傅立叶系数a、b
+        # 求解问题
+        problem = {'x': x, 'f': f, 'g': g}
+        solver_options = {'expand': False, 'verbose': False, 'ipopt': {'max_iter': 50000, 'hessian_approximation': 'limited-memory', },}
+        S = cs.nlpsol('S', 'ipopt', problem, solver_options)
+        print("MX 函数节点数: Y = {}, g = {}".format(Y_x_fun.n_nodes(), g_x_fun.n_nodes()))
+        # 生成满足三组线性等式且位于幅值边界内的非零初值
+        def make_initial_guess(rng, coefficient_scale=0.03):
+            a0 = rng.uniform(-coefficient_scale, coefficient_scale, size=(Rank, 7))
+            b0 = rng.uniform(-coefficient_scale, coefficient_scale, size=(Rank, 7))
+            harmonic_orders = np.arange(1, Rank + 1, dtype=float)
+            # qd(0) = 0: sum_l(a_l) = 0。
+            a0 -= np.mean(a0, axis=0, keepdims=True)
+            # q(0) = bias 且 qdd(0) = 0:
+            # sum_l(b_l / order_l) = 0，sum_l(order_l * b_l) = 0。
+            constraints_b = np.vstack((1.0 / harmonic_orders, harmonic_orders))
+            projection_b = constraints_b.T @ np.linalg.pinv(constraints_b @ constraints_b.T)
+            b0 -= projection_b @ (constraints_b @ b0)
+            angular_frequencies = 2.0 * math.pi * Ff * harmonic_orders
+            position_sum = np.sum(np.hypot(a0, b0) / angular_frequencies[:, None], axis=0)
+            velocity_sum = np.sum(np.hypot(a0, b0), axis=0)
+            for joint_index in range(7):
+                scale = 1.0
+                if position_sum[joint_index] > 0.0:
+                    scale = min(scale, 0.8 * position_margins[joint_index] / position_sum[joint_index])
+                if velocity_sum[joint_index] > 0.0:
+                    scale = min(scale, 0.8 * velocity_margins[joint_index] / velocity_sum[joint_index])
+                a0[:, joint_index] *= scale
+                b0[:, joint_index] *= scale
+            # CasADi 的 reshape/vec 是列主序；NumPy 这里必须明确 order='F'。
+            return np.vstack((a0, b0)).reshape((-1, 1), order='F')
+
+        init_x0 = make_initial_guess(np.random.default_rng(0))
+        initial_g = np.asarray(g_x_fun(init_x0).full(), dtype=float).reshape(-1)
+        lbg_np = np.asarray(lbg.full(), dtype=float).reshape(-1)
+        ubg_np = np.asarray(ubg.full(), dtype=float).reshape(-1)
+        initial_violation = max(0.0, float(np.max(lbg_np - initial_g)), float(np.max(initial_g - ubg_np)),)
+        print("初值最大约束违反:", initial_violation)
+        if not np.isfinite(initial_violation) or initial_violation > 1e-9:
+            raise RuntimeError("生成的初值不可行")
+        sol = S(x0=init_x0, lbg=lbg, ubg=ubg)
+        stats = S.stats()
+        status = stats.get('return_status', 'unknown')
+        print("IPOPT状态:", status)
+        if not stats.get('success', False):
+            raise RuntimeError(f"IPOPT未成功收敛: {status}")
+        ab_best = np.asarray(sol['x'].full(), dtype=float).reshape((2 * Rank, 7), order='F')
+        a_best = ab_best[:Rank, :]
+        b_best = ab_best[Rank:, :]
+        final_g = np.asarray(g_x_fun(sol['x']).full(), dtype=float).reshape(-1)
+        final_violation = max(0.0, float(np.max(lbg_np - final_g)), float(np.max(final_g - ubg_np)),)
+        print("最终最大约束违反:", final_violation)
+        # 此处打印的是数值 Y，而不是会导致内存爆炸的符号 SX 表达式。
+        Y_numeric = np.asarray(Y_fun(a_best, b_best).full(), dtype=float)
+        print("Y数值矩阵尺寸:", Y_numeric.shape)
+        # with np.printoptions(precision=6, suppress=True, linewidth=240, threshold=np.inf):
+            # print("Y数值矩阵:\n", Y_numeric)
+        A_raw = Y_numeric.T @ Y_numeric
+        A_raw = 0.5 * (A_raw + A_raw.T)
+        raw_eigenvalues = np.linalg.eigvalsh(A_raw)
+        A_reg_numeric = np.asarray(fc(a_best, b_best).full(), dtype=float)
+        A_reg_numeric = 0.5 * (A_reg_numeric + A_reg_numeric.T)
+        regularized_eigenvalues = np.linalg.eigvalsh(A_reg_numeric)
+        tolerance = max(A_raw.shape) * np.finfo(float).eps * max(float(raw_eigenvalues[-1]), 1.0)
+        numerical_rank = int(np.sum(raw_eigenvalues > tolerance))
+        raw_condition_a = math.inf if raw_eigenvalues[0] <= tolerance else raw_eigenvalues[-1] / raw_eigenvalues[0]
+        regularized_condition_a = regularized_eigenvalues[-1] / regularized_eigenvalues[0]
+        print("原始信息矩阵特征值: \n", raw_eigenvalues)
+        print("原始信息矩阵数值秩: {}/{}".format(numerical_rank, A_raw.shape[0]))
+        print("cond(A) 原始/正则化:", raw_condition_a, regularized_condition_a)
+        print("cond(Y) 原始/正则化:", math.sqrt(raw_condition_a), math.sqrt(regularized_condition_a))
+        print("对应的傅立叶系数:\na = {}\nb = {}".format(a_best, b_best))
+        return a_best, b_best, fc
     
     def get_ineq_Fourier_expression(self, Ff, a, b, q_min, q_max, q_vmin, q_vmax, ):
         """建立 Fourier 系数对应的周期边界及位置、速度幅值约束。
@@ -1001,7 +969,7 @@ class TrajGeneration(Node):
         raise ValueError("Run to here {0}".format(output))
 
 class TrajGenerationUsrPath(TrajGeneration):
-    def __init__(self, path=None, node_name = "para_estimatior", dt_ = 5.0, N_ = 100, gravity_vector=[4.905, 0.0, -8.496], ) -> None:
+    def __init__(self, path=None, node_name = "para_estimatior", dt_ = 5.0, N_ = 100, gravity_vector=[0, 0, -9.81], ) -> None:
         Node.__init__(self, node_name = node_name)
         if(path is None):
             raise ValueError("This Class need a pathdefine")
@@ -1012,8 +980,6 @@ class TrajGenerationUsrPath(TrajGeneration):
 def mainO(args=None):
     rclpy.init(args=args)
     path_xarm = os.path.join(get_package_share_directory("gravity_compensation"), "urdf", "xarm", "xarm7base.urdf.xacro",)
-    # path_xarm = os.path.join(get_package_share_directory("lbr_description"), "urdf", "med7", "med7.xacro",)
-    # path_xarm = os.path.join(get_package_share_directory("gravity_compensation"), "urdf", "med7dock.urdf.xacro", )
     print("path_xarm = ", path_xarm)
     # XArm 使用世界坐标系竖直向下的标准重力向量。
     paraEstimator = TrajGenerationUsrPath(path = path_xarm, gravity_vector = [0, 0, -9.81])
@@ -1021,20 +987,21 @@ def mainO(args=None):
     Ff = 0.1
     sampling_rate = 100.0
     # 优化阶段降采样以减小符号图，导出阶段再提高到100Hz
-    # sampling_rate_inoptimization = 20.0
-    sampling_rate_inoptimization = 2.0
-    a,b,fc = paraEstimator.generate_opt_traj_Link(Ff = Ff, sampling_rate = sampling_rate_inoptimization, 
-                                                  bias = [0, 0, 0.0, 0.0, 0.0, 1.0, 0.0],
-                                                  q_min=[-6.2, -12.0, -16.2, -10.19, -16.2, -11.69, -16.2],
-                                                  q_max=[6.2, 12.0, 16.2, 13.94, 16.2, 13.14, 16.2])
+    # sampling_rate = 20.0
+    sampling_rate = 5.0  
+    a,b,fc = paraEstimator.generate_opt_traj_Link(Ff = Ff, 
+                                                  sampling_rate = sampling_rate,               # 每秒采样数
+                                                  bias = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                                                  q_min=[-6.2, -6.2, -6.2, -6.2, -6.2, -6.2, -6.2],
+                                                  q_max=[6.2, 6.2, 6.2, 6.2, 6.2, 6.2, 6.2])
     print("a = {0} \n b = {1}".format(a,b))
     ret = paraEstimator.generateToCsv(a, b, Ff = Ff, sampling_rate = sampling_rate)
     if ret:
-        print("Done! Congratulations! self-collision avoidance")
-        eigenvalues, eigenvectors = np.linalg.eig(fc(a, b))
-        print("fc = ",eigenvalues)
+        print("Done! 轨迹已生成（当前碰撞约束关闭）")
+        eigenvalues = np.linalg.eigvalsh(np.asarray(fc(a, b).full(), dtype=float))
+        print("fc 的正则化特征值 = ", eigenvalues)
         print("a = {0} \n b = {1}".format(a, b))
-        conditional_num = np.sqrt(eigenvalues[0]/eigenvalues[-1])
+        conditional_num = np.sqrt(eigenvalues[-1] / eigenvalues[0])
         print("conditional_num_best = ", conditional_num)
     rclpy.shutdown()
 
@@ -1052,10 +1019,9 @@ def main(args=None):
         for theta2 in theta_range:
             a,b,fc = paraEstimator.generate_opt_traj_Link(Ff = Ff,sampling_rate = sampling_rate_inoptimization,bias = [theta1, theta2, 0.0, 0.0, 0.0, 0.0, 0.0])
             print("a = {0} \n b = {1}".format(a,b))
-            eigenvalues, eigenvectors = np.linalg.eig(fc(a,b))
+            eigenvalues = np.linalg.eigvalsh(np.asarray(fc(a, b).full(), dtype=float))
             print("fc = ",eigenvalues)
-            # 注意：这里直接取首尾特征值，代码没有显式排序。
-            conditional_num = np.sqrt(eigenvalues[0]/eigenvalues[-1])
+            conditional_num = np.sqrt(eigenvalues[-1] / eigenvalues[0])
             if conditional_num<conditional_num_best:
                 conditional_num_best = conditional_num
                 best_theta = [theta1, theta2]
@@ -1063,10 +1029,10 @@ def main(args=None):
                 b_best = b
     print("conditional_num_best = ",conditional_num_best)
     print("best_theta = ",best_theta)
-    ret = paraEstimator.generateToCsv(a,b,Ff = Ff,sampling_rate=sampling_rate)
+    ret = paraEstimator.generateToCsv(a_best, b_best, Ff = Ff, sampling_rate=sampling_rate)
     if ret:
-        print("Done! Congratulations! self-collision avoidance")
-        eigenvalues, eigenvectors = np.linalg.eig(fc(a,b))
+        print("Done! 轨迹已生成（当前碰撞约束关闭）")
+        eigenvalues = np.linalg.eigvalsh(np.asarray(fc(a_best, b_best).full(), dtype=float))
         print("fc = ",eigenvalues)
         print("a = ",a_best)
         print("b = ",b_best)
