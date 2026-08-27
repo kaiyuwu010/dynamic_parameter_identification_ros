@@ -293,25 +293,23 @@ def main():
     Nb, xyzs, rpys, axes = getJointParametersfromURDF(robot)
     dynamics_ = RNEA_function(Nb, 1, rpys, xyzs, axes)
     Ymat, PIvector = DynamicLinearlization(dynamics_, Nb)
-    Pb, Pd, Kd = find_dyn_parm_deps(7, 80, Ymat)
+    Pb, Pd, Kd = find_dyn_parm_deps(Nb, 10 * (Nb + 1), Ymat)
     K = Pb.T + Kd @ Pd.T
     pa_size = Pb.shape[1]
     # 生成轨迹
     q = np.array([1.0]*7)
     qd = np.array([0.0]*7)
     qdd = np.array([0.0]*7)
-    filter = TD_list_filter(T = 0.01)
     # 加载动力学参数
     path_pos = os.path.join(get_package_share_directory("gravity_compensation"), "test", "DynamicParameters.csv", )
     params = ExtractFromParamsCsv(path_pos)
     # 从urdf得到的惯性参数
     real_pam = PIvector(masses_np, massesCenter_np, Inertia_np)
+    base_params = K @ real_pam
     # 估计力矩
-    tau_est = (Ymat(q.tolist(), 
-                    filter(qd.tolist())[0], 
-                    filter(qd.tolist())[1]) @ Pb  @  params[:pa_size] + 
-                    np.diag(np.sign(qd)) @ params[pa_size:pa_size+7] + np.diag(qd) @ params[pa_size+7:])
-    print(" The estimated torque  tau_est = {0}".format(tau_est))
+    tau_est = (Ymat(q.tolist(), qd.tolist(), qdd.tolist()) @ Pb  @  params[:pa_size] +                                            # 计算力矩
+                    np.diag(np.sign(qd)) @ params[pa_size : pa_size + 7] + np.diag(qd) @ params[pa_size + 7 : pa_size + 14])      # 摩擦力
+    print("计算出的力矩为  tau_est = {0}".format(tau_est))
 
 if __name__ == "__main__":
     main()
