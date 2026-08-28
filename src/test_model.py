@@ -11,9 +11,9 @@ from rclpy import qos
 from rclpy.node import Node
 import csv
 
-from TrajGeneration import TrajGeneration
+from traj_generation import TrajGeneration
 from traj_simulation import TrajectoryConductionSim
-from regression import Estimator,traj_filter,compare_traj
+from para_regression import Estimator,traj_filter,compare_traj
 from utility_math import csv_save
 
 

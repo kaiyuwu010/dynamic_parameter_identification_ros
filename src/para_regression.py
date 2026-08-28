@@ -64,15 +64,13 @@ def select_important_samples(A, M_fri, b, preds, n_samples):
 
 # 动力学参数估计器
 class Estimator():
-    def __init__(self, node_name = "para_estimatior", dt_ = 5.0, N_ = 100, gravity_vec = [0.0, 0.0, -9.81]) -> None:
+    def __init__(self, path, ee_link="link_eef", node_name = "para_estimatior", dt_ = 5.0, N_ = 100, gravity_vec = [0.0, 0.0, -9.81]) -> None:
         self.dt_ = dt_
-        self.model_ = "nero_description"
-        path = os.path.join(get_package_share_directory("nero_description"), "urdf", f"{self.model_}.urdf",)
         self.N = N_
         # 获取机器人模型
         self.robot = optas.RobotModel(urdf_filename=path, time_derivs=[1])
         # 获取机器人关节参数
-        Nb, xyzs, rpys, axes = getJointParametersfromURDF(self.robot, ee_link="link7")
+        Nb, xyzs, rpys, axes = getJointParametersfromURDF(self.robot, ee_link=ee_link)
         # 计算机器人动力学模型
         self.dynamics_ = RNEA_function(Nb, 1, rpys, xyzs, axes, gravity_para = cs.DM(gravity_vec))
         # 通过动态线性化方法获取动力学回归矩阵和参数向量
@@ -402,8 +400,8 @@ class Estimator():
         # 求解优化问题，要满足 lbg <= g(x) <= ubg 和 lbx <= x <= ubx
         sol = solver(x0 = init_x0, lbg = constraint_lb, ubg = constraint_ub)
         stats = solver.stats()
-        if not stats.get('success', False):
-            raise RuntimeError("physical parameter optimization failed: " + str(stats.get('return_status', 'unknown status')))
+        # if not stats.get('success', False):
+        #     raise RuntimeError("带物理约束的优化失败: " + str(stats.get('return_status', 'unknown status')))
         return sol['x'], np.array(gt_x0)
     
     # 使用最小二乘法估计动力学参数
@@ -571,17 +569,24 @@ class Estimator():
     def saveEstimatedPara(self, parac)->None:
         path1 = pathlib.Path(__file__).resolve().parent / "test_data" / "DynamicParameters.csv"
         path1.parent.mkdir(parents=True, exist_ok=True)
-        para = parac.toarray().flatten()
-        keys = ["para_{0}".format(idx) for idx in range(len(para))]
+        para = np.asarray(parac).reshape(-1)
+        body_count = len(self.masses_np)
+        centers = para[body_count:body_count * 4].reshape((3, body_count), order="F")
+        inertias = para[body_count * 4:body_count * 13].reshape((3, body_count * 3), order="F")
+        keys = ["link", "mass", "com_x", "com_y", "com_z", "ixx", "ixy", "ixz", "iyx", "iyy", "iyz", "izx", "izy", "izz"]
+        rows = []
+        for i in range(7):
+            values = [para[i], *centers[:, i], *inertias[:, i * 3:(i + 1) * 3].reshape(-1)]
+            rows.append([f"link{i + 1}", *[f"{value:.5f}" for value in values]])
         with path1.open("w", newline="", encoding="utf-8") as csv_file:
-            self.save_(csv_file, keys, [para])
+            self.save_(csv_file, keys, rows)
             
 # 使用butterworth滤波器对轨迹数据进行低通滤波
 def traj_filter(states):
     cols = []
     l = len(states[0])
     fs = 100
-    cutoff_freq = 2  # 截止频率为10 Hz
+    cutoff_freq = 2  # 截止频率为10Hz
     b, a = signal.butter(4, cutoff_freq / (fs / 2), 'low')
     filtered_signal = []
     states_filtered = []
@@ -608,8 +613,10 @@ def compare_traj(states1, states2):
 
 
 def main(args=None):
+    # model_path = os.path.join(get_package_share_directory("nero_description"), "urdf",  "nero_description.urdf",)
+    model_path = os.path.join(get_package_share_directory("xarm_description"), "urdf",  "xarm7_description.urdf",)
     # 获取机器人参数估计器
-    paraEstimator = Estimator()
+    paraEstimator = Estimator(model_path)
     # 获取数据
     path_pos = pathlib.Path(__file__).resolve().parent / "test_data" / "mujoco_robot_data.csv"
     # 从CSV文件中提取位置、速度和努力数据

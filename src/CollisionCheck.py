@@ -7,7 +7,7 @@ from optas.spatialmath import *
 from ament_index_python import get_package_share_directory
 import os
 
-from gravity_compensation.src.TrajGeneration import getJointParametersfromURDF
+from traj_generation import getJointParametersfromURDF
 
 """
 This presents a collision check demo. Needs med7_dock_description
@@ -69,4 +69,3 @@ def main():
     # print("xyzs",xyzs)
 if __name__ == "__main__":
     main()
-

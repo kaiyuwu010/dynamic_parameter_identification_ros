@@ -12,7 +12,7 @@ from rclpy.node import Node
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from traj_simulation import TrajectoryConductionSim
-from regression import Estimator,traj_filter,compare_traj
+from para_regression import Estimator,traj_filter,compare_traj
 from utility_math import csv_save
 from MetaGen import combine_input_output, csv_saveCreate
 
@@ -268,4 +268,3 @@ def main(args=None):
 
 if __name__ == "__main__":
     main()
-

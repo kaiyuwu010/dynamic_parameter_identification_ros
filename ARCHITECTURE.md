@@ -4,7 +4,7 @@ The repository is split into four layers:
 
 1. `dynid_core`: ROS-independent identification using Pinocchio, NumPy/SciPy
    and optional CVXPY physical-consistency constraints.
-2. `TrajGeneration.py`: optional CasADi/Ipopt excitation-trajectory design.
+2. `traj_generation.py`: optional CasADi/Ipopt excitation-trajectory design.
 3. ROS 2 acquisition scripts: record timestamp, joint position and measured
    actuator torque only.
 4. `trajsimulation.py`: optional PyBullet simulation and collision validation.

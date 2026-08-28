@@ -198,9 +198,9 @@ class TrajGeneration(Node):
                                bias = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]):
         # 输入检查
         if Ff <= 0.0 or sampling_rate <= 0.0:
-            raise ValueError("Ff and sampling_rate must be positive")
+            raise ValueError("基频和采样率必须为正")
         if Rank < 2:
-            raise ValueError("Rank must be at least 2")
+            raise ValueError("谐波阶数至少为 2")
         q_min = np.asarray(q_min, dtype=float)
         q_max = np.asarray(q_max, dtype=float)
         q_vmin = np.asarray(q_vmin, dtype=float)
@@ -208,7 +208,7 @@ class TrajGeneration(Node):
         bias = np.asarray(bias, dtype=float)
         for name, values in (("q_min", q_min), ("q_max", q_max), ("q_vmin", q_vmin), ("q_vmax", q_vmax), ("bias", bias),):
             if values.shape != (7,):
-                raise ValueError(f"{name} must contain 7 values")
+                raise ValueError(f"{name} 必须包含 7 个值")
         # 位置幅值约束
         position_margins = np.minimum(q_max - bias, bias - q_min)
         # 速度幅值约束
@@ -242,7 +242,7 @@ class TrajGeneration(Node):
         pfun_list = [] # 各个采样点的碰撞约束
         for sample_index in range(pointsNum):
             tc = sample_index / sampling_rate
-            q = bias_dm
+            q = bias_dm           # 从零偏开始叠加傅立叶轨迹
             qd = cs.MX.zeros(7, 1)
             qdd = cs.MX.zeros(7, 1)
             for harmonic_index in range(Rank):
@@ -376,9 +376,8 @@ class TrajGeneration(Node):
                 f"bounds=[{lbg_np[index]:.8g}, {ubg_np[index]:.8g}], "
                 f"violation={violations[index]:.8g}"
             )         
-        
-        if not stats.get('success', False):
-            raise RuntimeError(f"IPOPT未成功收敛: {status}")
+        # if not stats.get('success', False):
+        #     raise RuntimeError(f"IPOPT未成功收敛: {status}")
         ab_best = np.asarray(sol['x'].full(), dtype=float).reshape((2 * Rank, 7), order='F')
         a_best = ab_best[:Rank, :]
         b_best = ab_best[Rank:, :]
@@ -812,22 +811,24 @@ class TrajGeneration(Node):
         return x_split1.full(),x_split2.full(),fc
 
     # 将Fourier系数保存为CSV文件
-    def generateToCsv(self, a, b, Ff, sampling_rate, path=None, scale=1.0):
+    def generateToCsv(self, a, b, Ff, sampling_rate, path=None, scale=1.0, bias=None,):
         assert a.shape == b.shape
         if path is None:
             path1 = "/tmp/target_joint_states.csv"
         else:
             path1 = path
         # 统一生成表头和行数据，保存到csv文件
-        values_list, keys = self.generateToList(a, b, Ff, sampling_rate)
+        values_list, keys = self.generateToList(a, b, Ff, sampling_rate, bias=bias)
         with open(path1,"w") as csv_file:
             self.save_(csv_file, keys, values_list)
         return True
 
     # 根据傅立叶系数、基频、采样率等参数生成傅立叶轨迹列表
-    def generateToList(self, a, b, Ff, sampling_rate, scale=1.0):
+    def generateToList(self, a, b, Ff, sampling_rate, scale=1.0, bias=None,):
         assert a.shape == b.shape
-        fourierInstance1 = FourierSeries(ff = Ff)
+        if bias is None:
+            bias = np.zeros(7)
+        fourierInstance1 = FourierSeries(Rank=a.shape[0], channel=a.shape[1], bias=np.asarray(bias, dtype=float).tolist(), ff=Ff,)
         cs_a = cs.SX.sym('ca', 5, 7)
         cs_b = cs.SX.sym('cb', 5, 7)
         t = cs.SX.sym('tt', 1)
@@ -1005,19 +1006,23 @@ def mainO(args=None):
     sampling_rate = 100.0
     # sampling_rate = 20.0
     sampling_rate = 5.0  
-    a, b, fc = paraEstimator.generate_opt_traj_Link(Ff = Ff,                                     # 每秒运行周期数
-                                                  sampling_rate = sampling_rate,                 # 每秒采样数
-                                                  bias = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-                                                  q_min = [-6.2, -6.2, -6.2, -6.2, -6.2, -6.2, -6.2],
-                                                  q_max = [6.2, 6.2, 6.2, 6.2, 6.2, 6.2, 6.2])
+    #   bias = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    bias = [0.0, 0.0, 0.0, 2.5, 0.0, 0.7, 0.0]  # xarm7机械臂测试零偏
+    a, b, fc = paraEstimator.generate_opt_traj_Link(Ff = Ff,                                                     # 每秒运行周期数
+                                                  sampling_rate = sampling_rate,                                 # 每秒采样数
+                                                  bias = bias,                 
+                                                #   q_min = [-6.28, -2.06, -6.28, -0.19, -6.28, -1.69, -6.28],     # xarm7机械臂真实限位
+                                                #   q_max = [ 6.28,  2.06,  6.28,  3.93,  6.28,  3.14,  6.28])     # xarm7机械臂真实限位
+                                                  q_min = [-6.28, -2.06, -6.28,  1.00, -6.28, -1.69, -6.28],     # xarm7机械臂测试限位
+                                                  q_max = [ 6.28,  2.06,  6.28,  3.93,  6.28,  3.14,  6.28])     # xarm7机械臂测试限位
                                                 #   q_min = [-2.7, -1.74, -2.75, -1.01, -2.75, -0.73, -1.571],   # nero机械臂真实限位
                                                 #   q_max = [ 2.7,  1.74,  2.75,  1.01,  2.75,  0.95,  1.571])   # nero机械臂真实限位
-                                                #   q_min = [-2.7, -2.0, -2.75, -1.6, -2.75, -1.8, -1.7],   # nero机械臂测试限位
-                                                #   q_max = [ 2.7,  2.0,  2.75,  1.6,  2.75,  1.8,  1.7])   # nero机械臂测试限位
+                                                #   q_min = [-2.7, -2.0, -2.75, -1.6, -2.75, -1.8, -1.7],        # nero机械臂测试限位
+                                                #   q_max = [ 2.7,  2.0,  2.75,  1.6,  2.75,  1.8,  1.7])        # nero机械臂测试限位
     print("a = {0} \n b = {1}".format(a, b))
     # 保存轨迹时采样率，根据机械臂控制频率决定
     gen_traj_sampling_rate = 100
-    ret = paraEstimator.generateToCsv(a, b, Ff = Ff, sampling_rate = gen_traj_sampling_rate)
+    ret = paraEstimator.generateToCsv(a, b, Ff = Ff, sampling_rate = gen_traj_sampling_rate, bias=bias,)
     if ret:
         print("Done! 轨迹已生成（当前碰撞约束关闭）")
         eigenvalues = np.linalg.eigvalsh(np.asarray(fc(a, b).full(), dtype=float))

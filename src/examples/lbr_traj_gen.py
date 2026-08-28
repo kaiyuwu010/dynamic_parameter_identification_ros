@@ -3,7 +3,7 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import rclpy
-from TrajGeneration import TrajGenerationUsrPath
+from traj_generation import TrajGenerationUsrPath
 from ament_index_python import get_package_share_directory
 import numpy as np
 
