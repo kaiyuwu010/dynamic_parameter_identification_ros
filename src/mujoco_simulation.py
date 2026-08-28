@@ -50,7 +50,7 @@ def _load_trajectory(trajectory, dof: int) -> np.ndarray:
 
 # 加载urdf/xacro并用mujoco执行关节轨迹
 class MuJoCoTrajectorySim:
-    def __init__(self, model_path, trajectory, *, timestep: float = 0.01, gravity=(0.0, 0.0, -9.81),):
+    def __init__(self, model_path, trajectory=None, *, timestep: float = 0.01, gravity=(0.0, 0.0, -9.81),):
         if timestep <= 0.0:
             raise ValueError("timestep must be positive")
         self.timestep = float(timestep)
@@ -68,8 +68,10 @@ class MuJoCoTrajectorySim:
         self.qpos_indices = np.asarray([self.model.jnt_qposadr[joint_id] for joint_id in self.joint_ids], dtype=int,)
         # 获取关节速度/力矩索引
         self.dof_indices = np.asarray([self.model.jnt_dofadr[joint_id] for joint_id in self.joint_ids], dtype=int,)
-        # 加载关节轨迹
-        self.trajectory = _load_trajectory(trajectory, len(self.joint_ids))
+        # 静态关节空间采样不需要轨迹；执行run_sim时才要求提供轨迹。
+        self.trajectory = None if trajectory is None else _load_trajectory(
+            trajectory, len(self.joint_ids)
+        )
 
     @staticmethod
     def _load_model(model_path) -> mujoco.MjModel:
@@ -97,6 +99,8 @@ class MuJoCoTrajectorySim:
 
     # 仿真轨迹得到力矩
     def run_sim(self, output_csv=None, use_gui=True) -> list[list[float]]:
+        if self.trajectory is None:
+            raise ValueError("执行轨迹仿真前必须提供trajectory")
         q = self.trajectory                                                  # 关节位置形状(采样点数，关节数)
         edge_order = 2 if q.shape[0] >= 3 else 1                             # 采样点数大于3，采样二阶精度求导，只有两个点，只能采用一阶精度求导
         qd = np.gradient(q, self.timestep, axis=0, edge_order=edge_order)    # 数值微分得到关节速度
@@ -128,6 +132,72 @@ class MuJoCoTrajectorySim:
             output_csv = Path(output_csv).expanduser().resolve()
             output_csv.parent.mkdir(parents=True, exist_ok=True)
             dof = len(self.joint_ids)
+            header = [f"Joint{i + 1}_Pos" for i in range(dof)]
+            header += [f"Joint{i + 1}_Torque" for i in range(dof)]
+            with output_csv.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.writer(stream)
+                writer.writerow(header)
+                writer.writerows(rows)
+        return rows
+
+    # 随机采样关节空间，并计算零速度、零加速度下的静态力矩
+    def sample_static_joint_space(
+        self,
+        sample_count: int = 1000,
+        output_csv=None,
+        *,
+        seed=None,
+        joint_lower=None,
+        joint_upper=None,
+        unbounded_range=(-np.pi, np.pi),
+        include_contacts: bool = False,
+    ) -> list[list[float]]:
+        if not isinstance(sample_count, (int, np.integer)) or sample_count <= 0:
+            raise ValueError("sample_count必须是正整数")
+        dof = len(self.joint_ids)
+        if (joint_lower is None) != (joint_upper is None):
+            raise ValueError("joint_lower和joint_upper必须同时提供")
+        if joint_lower is None:
+            fallback = np.asarray(unbounded_range, dtype=float).reshape(-1)
+            if fallback.shape != (2,) or not np.all(np.isfinite(fallback)) or fallback[0] >= fallback[1]:
+                raise ValueError("unbounded_range必须是递增的两个有限数")
+            lower = np.full(dof, fallback[0], dtype=float)
+            upper = np.full(dof, fallback[1], dtype=float)
+            for i, joint_id in enumerate(self.joint_ids):
+                if self.model.jnt_limited[joint_id]:
+                    limits = np.asarray(self.model.jnt_range[joint_id], dtype=float)
+                    if np.all(np.isfinite(limits)) and limits[0] < limits[1]:
+                        lower[i], upper[i] = limits
+        else:
+            lower = np.asarray(joint_lower, dtype=float).reshape(-1)
+            upper = np.asarray(joint_upper, dtype=float).reshape(-1)
+            if lower.shape != (dof,) or upper.shape != (dof,):
+                raise ValueError(f"关节范围长度必须等于活动关节数{dof}")
+            if not np.all(np.isfinite(lower)) or not np.all(np.isfinite(upper)):
+                raise ValueError("关节范围不能包含nan或无穷")
+            if np.any(lower >= upper):
+                raise ValueError("每个关节的下限必须小于上限")
+        rng = np.random.default_rng(seed)
+        positions = rng.uniform(lower, upper, size=(sample_count, dof))
+        rows = []
+        # 随机姿态可能发生自碰撞。静态重力力矩数据默认不加入接触约束力。
+        original_disableflags = self.model.opt.disableflags
+        if not include_contacts:
+            self.model.opt.disableflags |= int(mujoco.mjtDisableBit.mjDSBL_CONTACT)
+        try:
+            for position in positions:
+                mujoco.mj_resetData(self.model, self.data)
+                self.data.qpos[self.qpos_indices] = position
+                self.data.qvel[self.dof_indices] = 0.0
+                self.data.qacc[self.dof_indices] = 0.0
+                mujoco.mj_inverse(self.model, self.data)
+                torque = self.data.qfrc_inverse[self.dof_indices].copy()
+                rows.append(np.concatenate((position, torque)).tolist())
+        finally:
+            self.model.opt.disableflags = original_disableflags
+        if output_csv is not None:
+            output_csv = Path(output_csv).expanduser().resolve()
+            output_csv.parent.mkdir(parents=True, exist_ok=True)
             header = [f"Joint{i + 1}_Pos" for i in range(dof)]
             header += [f"Joint{i + 1}_Torque" for i in range(dof)]
             with output_csv.open("w", newline="", encoding="utf-8") as stream:

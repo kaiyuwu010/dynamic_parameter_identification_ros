@@ -12,7 +12,7 @@ import copy
 # OpTaS
 import optas
 from optas.spatialmath import *
-from IDmodel import RNEA_function,DynamicLinearlization,getJointParametersfromURDF,find_dyn_parm_deps,ExtractFromParamsCsv
+from dynamic_model import RNEA_function,DynamicLinearlization,getJointParametersfromURDF,find_dyn_parm_deps,ExtractFromParamsCsv
 
 """
 This presents an admittance controller for all directions of guiding

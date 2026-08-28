@@ -5,8 +5,27 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from scipy import signal
 
-from identification_numerics import differentiate_positions
+
+def differentiate_positions(positions, dt, *, window_length=11, polyorder=3):
+    q = np.asarray(positions, dtype=float)
+    if q.ndim != 2 or q.shape[0] < 2:
+        raise ValueError("positions must have shape (samples, joints), samples >= 2")
+    if not np.isscalar(dt) or float(dt) <= 0:
+        raise ValueError("dt must be a positive scalar")
+    n = q.shape[0]
+    window = min(int(window_length), n if n % 2 else n - 1)
+    if window >= polyorder + 2 and window >= 5:
+        qd = signal.savgol_filter(q, window, polyorder, deriv=1, delta=dt,
+                                  axis=0, mode="interp")
+        qdd = signal.savgol_filter(q, window, polyorder, deriv=2, delta=dt,
+                                   axis=0, mode="interp")
+    else:
+        edge_order = 2 if n >= 3 else 1
+        qd = np.gradient(q, dt, axis=0, edge_order=edge_order)
+        qdd = np.gradient(qd, dt, axis=0, edge_order=edge_order)
+    return qd, qdd
 
 
 @dataclass(frozen=True)

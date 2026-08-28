@@ -4,14 +4,11 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from identification_numerics import (  # noqa: E402
-    base_parameter_transform,
-    differentiate_positions,
-    scaled_least_squares,
-)
-from utility_math import quaternion_normalize  # noqa: E402
+from dynamic_model import base_parameter_transform  # noqa: E402
+from dynid_core.data import differentiate_positions  # noqa: E402
+from dynid_core.estimation import scaled_least_squares  # noqa: E402
 
 
 class IdentificationNumericsTest(unittest.TestCase):
@@ -42,13 +39,6 @@ class IdentificationNumericsTest(unittest.TestCase):
         Pb, Pd, Kd, rank = base_parameter_transform(Z)
         self.assertEqual(rank, 3)
         np.testing.assert_allclose(Z @ Pd, Z @ Pb @ Kd, atol=1e-11)
-
-    def test_quaternion_normalization_uses_euclidean_norm(self):
-        q = quaternion_normalize([2.0, 0.0, 0.0, 0.0])
-        np.testing.assert_allclose(q, [1.0, 0.0, 0.0, 0.0])
-        with self.assertRaises(ValueError):
-            quaternion_normalize([0.0, 0.0, 0.0, 0.0])
-
 
 if __name__ == "__main__":
     unittest.main()

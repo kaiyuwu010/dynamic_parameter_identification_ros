@@ -23,15 +23,55 @@ import pathlib
 import urdf_parser_py.urdf as urdf
 import math
 import copy
-from IDmodel import TD_2order, TD_list_filter,find_dyn_parm_deps, RNEA_function,DynamicLinearlization,getJointParametersfromURDF
+from dynamic_model import TD_2order, TD_list_filter,find_dyn_parm_deps, RNEA_function,DynamicLinearlization,getJointParametersfromURDF
 from scipy import signal
 from sklearn.ensemble import AdaBoostClassifier
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.linear_model import LinearRegression
-from identification_numerics import differentiate_positions, scaled_least_squares
-
-
 Order = [0,1,2,3,4,5,6]
+
+
+# 从关节位置计算速度和加速度；样本足够时使用 Savitzky-Golay 滤波。
+def differentiate_positions(positions, dt, *, window_length=11, polyorder=3):
+    q = np.asarray(positions, dtype=float)
+    if q.ndim != 2 or q.shape[0] < 2:
+        raise ValueError("positions must have shape (samples, joints), samples >= 2")
+    if not np.isscalar(dt) or float(dt) <= 0:
+        raise ValueError("dt must be a positive scalar")
+    n = q.shape[0]
+    window = min(int(window_length), n if n % 2 else n - 1)
+    if window >= polyorder + 2 and window >= 5:
+        qd = signal.savgol_filter(q, window, polyorder, deriv=1, delta=dt,
+                                  axis=0, mode="interp")
+        qdd = signal.savgol_filter(q, window, polyorder, deriv=2, delta=dt,
+                                   axis=0, mode="interp")
+    else:
+        edge_order = 2 if n >= 3 else 1
+        qd = np.gradient(q, dt, axis=0, edge_order=edge_order)
+        qdd = np.gradient(qd, dt, axis=0, edge_order=edge_order)
+    return qd, qdd
+
+
+# 对回归矩阵按列缩放后求最小二乘解，避免使用数值稳定性较差的正规方程。
+def scaled_least_squares(regressor, target, *, weights=None, rcond=None):
+    H = np.asarray(regressor, dtype=float)
+    y = np.asarray(target, dtype=float)
+    if H.ndim != 2 or y.shape[0] != H.shape[0]:
+        raise ValueError("regressor and target sample counts must match")
+    if weights is not None:
+        w = np.asarray(weights, dtype=float).reshape(-1)
+        if w.size != H.shape[0] or np.any(w <= 0):
+            raise ValueError("weights must be positive and match the row count")
+        root_w = np.sqrt(w)
+        H = H * root_w[:, None]
+        y = y * root_w.reshape((-1,) + (1,) * (y.ndim - 1))
+    scale = np.linalg.norm(H, axis=0)
+    scale[scale == 0] = 1.0
+    solution, residuals, rank, singular_values = np.linalg.lstsq(
+        H / scale, y, rcond=rcond
+    )
+    solution = solution / scale.reshape((-1,) + (1,) * (solution.ndim - 1))
+    return solution, residuals, rank, singular_values
 
 # 执行加权最小二乘法进行参数估计，H: 回归矩阵，大小为 (m, n)  i: 电流数据，大小为 (m, 1)
 def weighted_least_squares(H, i, max_iterations=100, tolerance=1e-6):

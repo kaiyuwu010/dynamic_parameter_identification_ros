@@ -10,7 +10,32 @@ import os
 import math
 import xacro
 import urdf_parser_py.urdf as urdf
-from identification_numerics import base_parameter_transform
+from scipy import linalg
+
+
+# 从完整惯性参数中分离可独立辨识列和相关列。
+def base_parameter_transform(observation_matrix, *, rtol=None):
+    Z = np.asarray(observation_matrix, dtype=float)
+    if Z.ndim != 2:
+        raise ValueError("observation_matrix must be two-dimensional")
+    _, R, pivots = linalg.qr(Z, mode="economic", pivoting=True)
+    diagonal = np.abs(np.diag(R))
+    if diagonal.size == 0:
+        raise ValueError("observation_matrix must not be empty")
+    if rtol is None:
+        rtol = max(Z.shape) * np.finfo(float).eps
+    rank = int(np.count_nonzero(diagonal > rtol * diagonal[0]))
+    if rank == 0:
+        raise ValueError("observation_matrix has zero numerical rank")
+    independent = np.asarray(pivots[:rank], dtype=int)
+    dependent = np.asarray(pivots[rank:], dtype=int)
+    Pb = np.eye(Z.shape[1])[:, independent]
+    Pd = np.eye(Z.shape[1])[:, dependent]
+    if dependent.size:
+        Kd = linalg.solve_triangular(R[:rank, :rank], R[:rank, rank:])
+    else:
+        Kd = np.empty((rank, 0))
+    return Pb, Pd, Kd, rank
 
 def sign(x):
     if x > 0:
@@ -322,5 +347,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 

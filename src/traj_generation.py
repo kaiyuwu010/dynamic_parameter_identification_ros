@@ -20,11 +20,12 @@ import pathlib
 import urdf_parser_py.urdf as urdf
 import math
 import copy
-from convexhallExtraction import get_convex_hull
 import random
+import open3d as o3d
+from sklearn.mixture import GaussianMixture
 
 import casadi as cs
-from IDmodel import find_dyn_parm_deps, RNEA_function, DynamicLinearlization, getJointParametersfromURDF
+from dynamic_model import find_dyn_parm_deps, RNEA_function, DynamicLinearlization, getJointParametersfromURDF
 
 # 检查数值或CasADi计算结果中是否包含NaN
 def contains_nan(x):
@@ -562,7 +563,18 @@ class TrajGeneration(Node):
         # 用末端网格凸包点与各连杆椭球的相对位置近似自碰撞约束。
         path_pos = os.path.join(get_package_share_directory("med7_dock_description"), "meshes", "EndEffector.STL", )
         # 凸包用于减少 STL 点数；当前网格路径及连杆名称仍是 MED7 专用
-        points = get_convex_hull(path_pos)
+        mesh = o3d.io.read_triangle_mesh(path_pos)
+        convex_hull, _ = mesh.compute_convex_hull()
+        hull_points = np.asarray(convex_hull.vertices)
+        scores = []
+        for component_count in range(1, 11):
+            model = GaussianMixture(n_components=component_count, random_state=0)
+            model.fit(hull_points)
+            scores.append(model.score(hull_points))
+        best_component_count = int(np.argmax(scores)) + 1
+        model = GaussianMixture(n_components=best_component_count, random_state=0)
+        model.fit(hull_points)
+        points = model.means_
         vfs_fun = []
         for point in points:
             for i in range(2,6):
@@ -651,7 +663,18 @@ class TrajGeneration(Node):
         fourierDDot = [optas.jacobian(fourierDot[i],t) for i in range(len(fourierDot))]
         print(fourierDot)
         path_pos = os.path.join(get_package_share_directory("med7_dock_description"), "meshes", "EndEffector.STL",)
-        points = get_convex_hull(path_pos)
+        mesh = o3d.io.read_triangle_mesh(path_pos)
+        convex_hull, _ = mesh.compute_convex_hull()
+        hull_points = np.asarray(convex_hull.vertices)
+        scores = []
+        for component_count in range(1, 11):
+            model = GaussianMixture(n_components=component_count, random_state=0)
+            model.fit(hull_points)
+            scores.append(model.score(hull_points))
+        best_component_count = int(np.argmax(scores)) + 1
+        model = GaussianMixture(n_components=best_component_count, random_state=0)
+        model.fit(hull_points)
+        points = model.means_
         # print("points", points)
         # raise Exception("Run to here")
         str_prefix = "lbr_"

@@ -4,7 +4,26 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from identification_numerics import scaled_least_squares
+
+def scaled_least_squares(regressor, target, *, weights=None, rcond=None):
+    H = np.asarray(regressor, dtype=float)
+    y = np.asarray(target, dtype=float)
+    if H.ndim != 2 or y.shape[0] != H.shape[0]:
+        raise ValueError("regressor and target sample counts must match")
+    if weights is not None:
+        w = np.asarray(weights, dtype=float).reshape(-1)
+        if w.size != H.shape[0] or np.any(w <= 0):
+            raise ValueError("weights must be positive and match the row count")
+        root_w = np.sqrt(w)
+        H = H * root_w[:, None]
+        y = y * root_w.reshape((-1,) + (1,) * (y.ndim - 1))
+    scale = np.linalg.norm(H, axis=0)
+    scale[scale == 0] = 1.0
+    solution, residuals, rank, singular_values = np.linalg.lstsq(
+        H / scale, y, rcond=rcond
+    )
+    solution = solution / scale.reshape((-1,) + (1,) * (solution.ndim - 1))
+    return solution, residuals, rank, singular_values
 
 
 @dataclass(frozen=True)
