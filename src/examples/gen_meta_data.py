@@ -11,7 +11,7 @@ from rclpy import qos
 from rclpy.node import Node
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from trajsimulation import TrajectoryConductionSim
+from traj_simulation import TrajectoryConductionSim
 from regression import Estimator,traj_filter,compare_traj
 from utility_math import csv_save
 from MetaGen import combine_input_output, csv_saveCreate
@@ -30,7 +30,7 @@ module_path = os.path.join(
             "gravity_compensation"
         )
 sys.path.append(module_path)
-from trajsimulation import replace_package_paths_in_xacro
+from traj_simulation import replace_package_paths_in_xacro
 
 module_path1 = os.path.join(
             get_package_prefix("path_following_pipeline"),

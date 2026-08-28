@@ -13,7 +13,7 @@ import csv
 
 from TrajGeneration import TrajGeneration
 
-from trajsimulation import TrajectoryConductionSim
+from traj_simulation import TrajectoryConductionSim
 from regression import Estimator,traj_filter,compare_traj
 from utility_math import csv_save
 

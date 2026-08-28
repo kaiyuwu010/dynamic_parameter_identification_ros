@@ -37,13 +37,15 @@ def get_axis_torque(axis, torques):
         return mz if az > 0 else -mz
     else:
         return 0  
-    
+
+# 通过速度的一阶差分计算关节加速度
 def calculate_joint_accelerations(current_velocities, previous_velocities, delta_time):
     if delta_time <= 0:
         raise ValueError("delta_time must be positive")
     joint_accelerations = [(current - previous) / delta_time for current, previous in zip(current_velocities, previous_velocities)]
     return joint_accelerations
-    
+
+# 把"package://包名/相对路径"转换为实际文件路径
 def resolve_package_path(package_path):
     if not package_path.startswith('package://'):
         return package_path
@@ -56,6 +58,7 @@ def resolve_package_path(package_path):
     absolute_path = os.path.join(package_dir, relative_path)
     return absolute_path
 
+# 将<mesh>中的filename = "package://包名/路径"替换成绝对路径，然后覆盖原Xacro文件
 def replace_package_paths_in_xacro(xacro_file):
     tree = ET.parse(xacro_file)
     root = tree.getroot()
@@ -138,24 +141,29 @@ class TrajectoryConductionSim(Node):
         self.estimate_gt = K @ self.PIvector(self.params[0:_w0], self.params[_w0:l1].reshape((_w1,_h1)), self.params[l1:l].reshape((_w2,_h2)))
         self.Pb = Pb
 
+    # 计算逆动力学，返回各关节力矩
     def inverse_dynamics(self, q_np, qd_np, qdd_np):
         if self.params is None:
             raise ValueError("Forgot Params Setting")
-        tau_ext = (self.Ymat(q_np,qd_np,qdd_np) @self.Pb@  self.estimate_gt + np.diag(np.sign(qd_np)) @ self.params[-2*len(qd_np):-len(qd_np)] + np.diag(qd_np) @ self.params[-len(qd_np):])
+        tau_ext = (self.Ymat(q_np, qd_np, qdd_np) @ self.Pb @ self.estimate_gt + 
+                   np.diag(np.sign(qd_np)) @ self.params[-2*len(qd_np):-len(qd_np)] + np.diag(qd_np) @ self.params[-len(qd_np):])
         return tau_ext.full().flatten()
 
-    def import_traj_frompath(self, path="/home/thy/target_joint_states.csv"):
+    # 从CSV中读取第2～8列的7个关节位置，保存到self.qs_des_
+    def import_traj_frompath(self, path = "/home/thy/target_joint_states.csv"):
         self.qs_des_ = []
         with open(path, newline="") as csvfile:
             csv_reader = csv.DictReader(csvfile)
             for row in csv_reader:
                 self.qs_des_.append([float(qi_des) for qi_des in list(row.values())[1:8]])
-    
+                
+    # 读取第2～8个元素作为7个关节角
     def import_traj_fromlist(self, trajlist):
         self.qs_des_ = []
         for row in trajlist:
             self.qs_des_.append([float(qi_des) for qi_des in row[1:8]])
 
+    # 随机生成1000组关节位置，返回列表
     def run_sim_in_workspace(self):
         joint_lower_limit = []
         joint_upper_limit = []
@@ -163,12 +171,10 @@ class TrajectoryConductionSim(Node):
             joint_info = p.getJointInfo(self.robot_id, joint_index)
             joint_type = joint_info[2]
             if joint_type != p.JOINT_FIXED:
-                # non_fixed_joints += [joint_index]
                 joint_name = joint_info[1].decode('utf-8')
                 joint_lower_limit.append(joint_info[8]) 
                 joint_upper_limit.append(joint_info[9])  
                 # print(f"Joint {joint_name} (index {joint_index}): lower limit = {joint_lower_limit}, upper limit = {joint_upper_limit}")
-        # self.non_fixed_joints = non_fixed_joints
         print(joint_upper_limit)
         for index, joint in enumerate(self.non_fixed_joints):
             p.enableJointForceTorqueSensor(self.robot_id, joint, enableSensor=True)
@@ -202,6 +208,7 @@ class TrajectoryConductionSim(Node):
             data.append(joint_positions + list(joint_torques))
         return data        
 
+    # 使用self.qs_des_作为输入，返回列表
     def run_sim_to_list(self):
         for index, joint in enumerate(self.non_fixed_joints):
             p.resetJointState(self.robot_id, joint, self.qs_des_[0][index])
@@ -239,6 +246,7 @@ class TrajectoryConductionSim(Node):
             time.sleep(1. / 100.)
         return data
 
+    # 使用self.qs_des_作为输入，保存结果到csv
     def run_sim(self, name = 'robot_data.csv'):
         for index, joint in enumerate(self.non_fixed_joints):
             p.resetJointState(self.robot_id, joint, self.qs_des_[0][index])
@@ -246,7 +254,6 @@ class TrajectoryConductionSim(Node):
         # 模拟一系列位置控制
         data =[]
         for step in range(len(self.qs_des_)):
-            # 示例：随机设置关节目标位置
             # print("qs_des_")
             target_positions = self.qs_des_[step]
             for index, joint in enumerate(self.non_fixed_joints):
@@ -271,25 +278,30 @@ class TrajectoryConductionSim(Node):
         # 断开PyBullet
         # p.disconnect()
 
+    # 设置重力
     def set_gravity_vector(self, vector = [0.0, 0.0, -9.81]):
         p.setGravity(*vector)
 
+    # 设置连杆表面的横向接触摩擦
     def set_friction_params(self, friction_para = 0.0):
         for index, joint in enumerate(self.non_fixed_joints):
             out = p.getDynamicsInfo(self.robot_id, joint)
             o = p.getJointInfo(self.robot_id, joint)
             print("out = ",out)
             print("o = ",o)
+            # lateralFriction用于连杆与外部物体接触时的库仑摩擦，不是关节轴内部摩擦
             p.changeDynamics(self.robot_id, joint, lateralFriction = friction_para)
 
+# 把med7dock.urdf.xacro展开成普通URDF，同时替换URDF的资源路径和关节阻尼
 def generateURDF():
     resource_path1 = os.path.join(get_package_share_directory("med7_dock_description"))
     resource_path2 = os.path.join(get_package_share_directory("lbr_description"))
     package_paths = ["package://lbr_description", "package://med7_dock_description","damping=\"10.0\""]
     actual_paths = [resource_path2, resource_path1,"damping=\"0.1\""]
     xacro_filename = os.path.join(get_package_share_directory("med7_dock_description"), "urdf", "med7dock.urdf.xacro", )
-    generateURDFwithReplace(xacro_filename, "med7dock.urdf",package_paths,actual_paths)
+    generateURDFwithReplace(xacro_filename, "med7dock.urdf", package_paths, actual_paths)
 
+# 展开 Xacro，得到普通 URDF 字符串 按照两组列表逐项替换内容 将结果写入 urdf_path
 def generateURDFwithReplace(xacro_filename, urdf_path, package_list, actual_list):
     urdf_string = xacro.process(xacro_filename)
     for package_path, actual_path in zip(package_list, actual_list):

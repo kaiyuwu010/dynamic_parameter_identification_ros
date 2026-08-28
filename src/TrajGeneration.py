@@ -26,7 +26,7 @@ import random
 import casadi as cs
 from IDmodel import find_dyn_parm_deps, RNEA_function, DynamicLinearlization, getJointParametersfromURDF
 
-# 检查数值或 CasADi 计算结果中是否包含 NaN
+# 检查数值或CasADi计算结果中是否包含NaN
 def contains_nan(x):
     for i,element in enumerate(np.array(x).flatten()):
         if np.isnan(element):
@@ -129,10 +129,10 @@ class TrajGeneration(Node):
         gv = gravity_vector
         self.initial_model_params(path, gv)
     # 根据URDF文件路径和重力向量初始化机器人模型、动力学函数和回归矩阵
-    def initial_model_params(self, path, gv):
-        self.robot = optas.RobotModel(xacro_filename=path, time_derivs=[1],)
+    def initial_model_params(self, path, gv, ee_link = "link7"):
+        self.robot = optas.RobotModel(xacro_filename = path, time_derivs=[1],)
         # 从URDF中提取关节参数
-        Nb, xyzs, rpys, axes = getJointParametersfromURDF(self.robot)
+        Nb, xyzs, rpys, axes = getJointParametersfromURDF(self.robot, ee_link)
         # 构造逆动力学函数
         self.dynamics_ = RNEA_function(Nb, 1, rpys, xyzs, axes, gravity_para=cs.DM(gv))
         # 构造回归矩阵和完整动力学参数向量
@@ -294,7 +294,7 @@ class TrajGeneration(Node):
         fc = cs.Function('fc', [a_eval, b_eval], [A_x_fun(x_eval)])        # 把计算信息矩阵A_reg的符号表达式封装为函数，输入傅立叶系数a、b
         # 求解问题
         problem = {'x': x, 'f': f, 'g': g}
-        solver_options = {'expand': False, 'verbose': False, 'ipopt': {'max_iter': 50000, 'hessian_approximation': 'limited-memory', },}
+        solver_options = {'expand': False, 'verbose': False, 'ipopt': {'max_iter': 50000, 'hessian_approximation': 'limited-memory', "print_level": 0,},}
         S = cs.nlpsol('S', 'ipopt', problem, solver_options)
         print("MX 函数节点数: Y = {}, g = {}".format(Y_x_fun.n_nodes(), g_x_fun.n_nodes()))
         # 生成满足三组线性等式且位于幅值边界内的非零初值
@@ -769,76 +769,49 @@ class TrajGeneration(Node):
         print("sol = {0}".format(_x0_best))
         return x_split1.full(),x_split2.full(),fc
 
-    # 将Fourier系数采样为CSV文件
+    # 将Fourier系数保存为CSV文件
     def generateToCsv(self, a, b, Ff, sampling_rate, path=None, scale=1.0):
         assert a.shape == b.shape
         if path is None:
             path1 = "/tmp/target_joint_states.csv"
         else:
             path1 = path
-        # 统一生成表头和行数据，避免写文件时再次计算轨迹。
+        # 统一生成表头和行数据，保存到csv文件
         values_list, keys = self.generateToList(a, b, Ff, sampling_rate)
         with open(path1,"w") as csv_file:
-            self.save_(csv_file,keys,values_list)
+            self.save_(csv_file, keys, values_list)
         return True
 
+    # 根据傅立叶系数、基频、采样率等参数生成傅立叶轨迹列表
     def generateToList(self, a, b, Ff, sampling_rate, scale=1.0):
-        """在一个周期内采样 Fourier 轨迹，返回时间、位置和速度。
-
-        返回列顺序为 ``time_stamps``、7 个 ``lbr_A*i`` 位置以及 7 个
-        ``lbr_A*iv`` 速度；当前输出格式固定面向 7 轴 LBR。
-
-        Args:
-            a/b: 当前预期形状为 ``(5, 7)``。
-            Ff: 基频 Hz，总时长为 ``T=1/Ff``。
-            sampling_rate: 输出采样频率，行数为 ``sampling_rate/Ff``。
-            scale: Fourier 相位时间缩放；CSV 中记录的时间戳不随之改变。
-
-        Returns:
-            ``(values_list, keys)``。每行 15 项：时间戳、7 个位置、
-            7 个速度。采样区间为 ``[0,T)``，不会重复周期终点。
-        """
-        
         assert a.shape == b.shape
-
-        # 当前没有传入优化时的 bias，因此这里按 FourierSeries 默认 bias 重建。
         fourierInstance1 = FourierSeries(ff = Ff)
-
-        cs_a = cs.SX.sym('ca', 5,7)
-        cs_b = cs.SX.sym('cb', 5,7)
+        cs_a = cs.SX.sym('ca', 5, 7)
+        cs_b = cs.SX.sym('cb', 5, 7)
         t = cs.SX.sym('tt', 1)
-
         fourierF = fourierInstance1.FourierFunction(t, cs_a, cs_b,'f2')
-
-        fourier = fourierF(cs_a,cs_b,t)
-
+        fourier = fourierF(cs_a, cs_b, t)
         # 速度从同一个位置表达式自动微分，保证位置与速度数学一致。
-        fourierDot = [optas.jacobian(fourier[i],t) for i in range(len(fourier))]
-        _fDot = optas.Function('fund',[cs_a,cs_b,t],fourierDot)
-        # fourierDDot = [optas.jacobian(fourierDot[i],t) for i in range(len(fourierDot))]
-
-        # 一个周期共 sampling_rate/Ff 个点，终点 T 与起点重复所以不写入。
+        fourierDot = [optas.jacobian(fourier[i], t) for i in range(len(fourier))]
+        _fDot = optas.Function('fund', [cs_a, cs_b, t], fourierDot)
+        # 一个周期的点数，终点不写入
         pointsNum = int(sampling_rate/Ff)
-        Ts = 1.0/Ff
-
-        keys = ["lbr_A0", "lbr_A1", "lbr_A2", "lbr_A3", "lbr_A4", "lbr_A5", "lbr_A6", "lbr_A0v", "lbr_A1v", "lbr_A2v", "lbr_A3v", "lbr_A4v", "lbr_A5v", "lbr_A6v"]
-        keys = ["time_stamps"] + keys
+        keys = ["关节0位置", "关节1位置", "关节2位置", "关节3位置", "关节4位置", "关节5位置", "关节6位置", 
+                "关节0速度", "关节1速度", "关节2速度", "关节3速度", "关节4速度", "关节5速度", "关节6速度"]
+        keys = ["时间戳"] + keys
         values_list = []
         for k in range(pointsNum):
+            # 采样时间
             tc = 1.0/(sampling_rate) * k
-            # f = fourierF(np.asarray(a),np.asarray(b),tc)
-            # f = _f(tc)
-            # print("b = {0}".format(b))
-            # scale>1 加速 Fourier 相位，scale<1 减慢相位。
-            f_temp =fourierInstance1.FourierValue(a,b,scale*tc)
-            # print("f_temp = {0}".format(f_temp))
-            fd_temp=_fDot(np.asarray(a),np.asarray(b),scale*tc)
-            q_list = [float(id) for id in f_temp]#fourier(a,b,tc)
-            qd_list = [float(id) for id in fd_temp] #fourierDot(a,b,tc)
+            # 采样位置
+            f_temp = fourierInstance1.FourierValue(a, b, scale*tc)
+            # 采样速度
+            fd_temp=_fDot(np.asarray(a), np.asarray(b), scale*tc)
+            # 转化到列表
+            q_list = [float(id) for id in f_temp]
+            qd_list = [float(id) for id in fd_temp] 
+            # 拼接到列表
             values_list.append([tc] + q_list + qd_list)
-            # if os.path.isfile(path1):
-        # with open(path1,"w") as csv_file:
-        #     self.save_(csv_file,keys,values_list)
         return values_list, keys
     
     # 按照keys指定的列顺序写入带表头CSV
@@ -969,40 +942,44 @@ class TrajGeneration(Node):
         raise ValueError("Run to here {0}".format(output))
 
 class TrajGenerationUsrPath(TrajGeneration):
-    def __init__(self, path=None, node_name = "para_estimatior", dt_ = 5.0, N_ = 100, gravity_vector=[0, 0, -9.81], ) -> None:
+    def __init__(self, path=None, node_name = "para_estimatior", dt_ = 5.0, N_ = 100, gravity_vector=[0, 0, -9.81], ee_link = "link7", ) -> None:
         Node.__init__(self, node_name = node_name)
         if(path is None):
             raise ValueError("This Class need a pathdefine")
         _path = path
         gv = gravity_vector
-        self.initial_model_params(_path, gv)
+        self.initial_model_params(_path, gv, ee_link)
 
 def mainO(args=None):
     rclpy.init(args=args)
-    path_xarm = os.path.join(get_package_share_directory("gravity_compensation"), "urdf", "xarm", "xarm7base.urdf.xacro",)
-    print("path_xarm = ", path_xarm)
+    # 根据包名获取share目录下的完整路径
+    # model_path = os.path.join(get_package_share_directory("xarm_description"), "urdf", "xarm_device.urdf.xacro",)
+    model_path = os.path.join(get_package_share_directory("nero_description"), "urdf", "nero_description.urdf",)
+    print("urdf路径 = ", model_path)
     # XArm 使用世界坐标系竖直向下的标准重力向量。
-    paraEstimator = TrajGenerationUsrPath(path = path_xarm, gravity_vector = [0, 0, -9.81])
+    # paraEstimator = TrajGenerationUsrPath(path = model_path, gravity_vector = [0, 0, -9.81], ee_link = "link_eef")
+    paraEstimator = TrajGenerationUsrPath(path = model_path, gravity_vector = [0, 0, -9.81], ee_link = "link7")
     # 基频0.1Hz，优化时降采样，导出时使用100Hz
     Ff = 0.1
     sampling_rate = 100.0
-    # 优化阶段降采样以减小符号图，导出阶段再提高到100Hz
     # sampling_rate = 20.0
     sampling_rate = 5.0  
-    a,b,fc = paraEstimator.generate_opt_traj_Link(Ff = Ff, 
-                                                  sampling_rate = sampling_rate,               # 每秒采样数
+    a, b, fc = paraEstimator.generate_opt_traj_Link(Ff = Ff,                                     # 每秒运行周期数
+                                                  sampling_rate = sampling_rate,                 # 每秒采样数
                                                   bias = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-                                                  q_min=[-6.2, -6.2, -6.2, -6.2, -6.2, -6.2, -6.2],
-                                                  q_max=[6.2, 6.2, 6.2, 6.2, 6.2, 6.2, 6.2])
-    print("a = {0} \n b = {1}".format(a,b))
-    ret = paraEstimator.generateToCsv(a, b, Ff = Ff, sampling_rate = sampling_rate)
+                                                  q_min = [-6.2, -6.2, -6.2, -6.2, -6.2, -6.2, -6.2],
+                                                  q_max = [6.2, 6.2, 6.2, 6.2, 6.2, 6.2, 6.2])
+    print("a = {0} \n b = {1}".format(a, b))
+    # 保存轨迹时采样率，根据机械臂控制频率决定
+    gen_traj_sampling_rate = 100
+    ret = paraEstimator.generateToCsv(a, b, Ff = Ff, sampling_rate = gen_traj_sampling_rate)
     if ret:
         print("Done! 轨迹已生成（当前碰撞约束关闭）")
         eigenvalues = np.linalg.eigvalsh(np.asarray(fc(a, b).full(), dtype=float))
         print("fc 的正则化特征值 = ", eigenvalues)
         print("a = {0} \n b = {1}".format(a, b))
         conditional_num = np.sqrt(eigenvalues[-1] / eigenvalues[0])
-        print("conditional_num_best = ", conditional_num)
+        print("条件数为 = ", conditional_num)
     rclpy.shutdown()
 
 

@@ -245,11 +245,13 @@ def getJointParametersfromURDF(robot, ee_link="link_ee"):
     robot_urdf = robot.urdf
     root = robot_urdf.get_root()
     xyzs, rpys, axes = [], [], []
-    print("link_names = ",robot.link_names)
+    print("连杆名 = ", robot.link_names)
     # 从root连杆到ee连杆
     joints_list = robot_urdf.get_chain(root, ee_link, links=False)
+    print("关节列表 =", joints_list)
     # 提取xyzs、rpys、axes
     joints_list_r = joints_list[1:]
+    print("忽略第一个关节后的列表 =", joints_list_r)
     for joint_name in joints_list_r:
         joint = robot_urdf.joint_map[joint_name]
         xyz, rpy = robot.get_joint_origin(joint)
@@ -258,7 +260,14 @@ def getJointParametersfromURDF(robot, ee_link="link_ee"):
         xyzs.append(xyz)
         rpys.append(rpy)
         axes.append(axis) # 相对于所在关节的坐标系
-    Nb = len(joints_list_r)-1
+    # 按运动关节数量确定自由度
+    Nb = sum(robot_urdf.joint_map[name].type != "fixed" for name in joints_list_r)
+    print("活动连杆数量Nb =", Nb)
+    if len(rpys) == Nb:
+        xyzs.append([0.0, 0.0, 0.0])
+        rpys.append([0.0, 0.0, 0.0])
+        axes.append([0.0, 0.0, 0.0])
+    print("位姿变换数量 =", len(rpys))
     return Nb, xyzs, rpys, axes
 
 # 通过随机采样，寻找动力学参数之间的线性依赖关系

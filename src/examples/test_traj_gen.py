@@ -7,7 +7,7 @@ import rclpy
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from trajsimulation import TrajectoryConductionSim
+from traj_simulation import TrajectoryConductionSim
 
 from MetaGen import generate_excitation_sat_path,process_regression_data,plot_params,process_data_with_given_params,view_channels
 from TrajGeneration import save_to_csv, load_from_csv

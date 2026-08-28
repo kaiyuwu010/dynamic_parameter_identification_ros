@@ -9,7 +9,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import rclpy
 from rclpy import qos
 from rclpy.node import Node
-import trajsimulation 
+import traj_simulation 
 
 
 def main(args=None):
@@ -33,7 +33,7 @@ def main(args=None):
             "med"
         )
     ]
-    instance = trajsimulation.TrajectoryConductionSim(file_name, paths,traj_data = '/tmp/target_joint_states.csv')
+    instance = traj_simulation.TrajectoryConductionSim(file_name, paths,traj_data = '/tmp/target_joint_states.csv')
     instance.set_friction_params()
     instance.run_sim()
     # instance.set_gravity_vector([4.905, 0.0, -8.496])
