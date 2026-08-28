@@ -149,7 +149,9 @@ python3 dynamic_parameter_identification_ros/src/para_regression.py
 dynamic_parameter_identification_ros/src/test_data/DynamicParameters.csv
 ```
 
-文件每行对应一个连杆，列顺序为质量、质心和惯量矩阵元素，数值保留 5 位小数。
+文件每行对应动力学链中的一个刚体，行数根据 URDF 自动确定；无额外末端刚体时会在内部使用零参数虚拟末端。列顺序为质量、质心和惯量矩阵元素，数值保留 5 位小数。
+
+主流程会从 URDF 自动识别唯一的叶子连杆、活动关节数和动力学参数维度，因此同一套代码可以处理 xArm5、xArm6、xArm7 和 nero。若 URDF 存在多个分支末端，需要在创建 `TrajGenerationUsrPath` 或 `Estimator` 时显式传入 `ee_link`。
 
 ## 如何评价辨识结果
 

@@ -115,6 +115,7 @@ def ExtractFromParamsCsv(path):
 # axes[i]: 连杆i的旋转轴，连杆0是第一个连杆不是root，大小为NfX3，(0、...、Nf-1)，包括末端刚体相对最后连杆的连接轴
 # gravity_para: 基坐标系下的重力加速度
 def RNEA_function(Nb, Nk, rpys, xyzs, axes, gravity_para = cs.DM([0, 0, -9.81])):
+    # 总刚体数，包括末端固定刚体
     Nf = Nb+Nk
     om0 = cs.DM([0.0,0.0,0.0])
     om0D = cs.DM([0.0,0.0,0.0])
@@ -127,8 +128,8 @@ def RNEA_function(Nb, Nk, rpys, xyzs, axes, gravity_para = cs.DM([0, 0, -9.81]))
     cm = cs.SX.sym('cm', 3, Nb+1)
     Icm = cs.SX.sym('Icm', 3, 3*Nb+3)
     # 合力和合力矩列表
-    fs = [cs.DM([0.0,0.0,0.0])]
-    ns = [cs.DM([0.0,0.0,0.0])]
+    fs = [cs.DM([0.0, 0.0, 0.0])]
+    ns = [cs.DM([0.0, 0.0, 0.0])]
     # 各关节坐标系的角速度、角加速度、线加速度
     oms = [om0]
     omDs = [om0D]
@@ -265,8 +266,22 @@ def find_eigen_value(dof, parm_num, regressor_func, shape):
     U, s, V = np.linalg.svd(A_mat)
     return U, V
 
+# 确定串联机械臂的末端连杆，如果有多个叶子连杆报错
+def resolveEndEffectorLink(robot, ee_link=None):
+    if ee_link is not None:
+        if ee_link not in robot.urdf.link_map:
+            raise ValueError(f"URDF中不存在末端连杆{ee_link}")
+        return ee_link
+    parent_links = {joint.parent for joint in robot.urdf.joints}
+    leaves = [link.name for link in robot.urdf.links if link.name not in parent_links]
+    if len(leaves) != 1:
+        raise ValueError(f"URDF有{len(leaves)}个叶子连杆,请显式指定ee_link: {leaves}")
+    return leaves[0]
+
+
 # 从urdf文件获取关节参数
-def getJointParametersfromURDF(robot, ee_link="link_ee"):
+def getJointParametersfromURDF(robot, ee_link=None):
+    ee_link = resolveEndEffectorLink(robot, ee_link)
     robot_urdf = robot.urdf
     root = robot_urdf.get_root()
     xyzs, rpys, axes = [], [], []
@@ -275,8 +290,11 @@ def getJointParametersfromURDF(robot, ee_link="link_ee"):
     joints_list = robot_urdf.get_chain(root, ee_link, links=False)
     print("关节列表 =", joints_list)
     # 提取xyzs、rpys、axes
-    joints_list_r = joints_list[1:]
-    print("忽略第一个关节后的列表 =", joints_list_r)
+    joints_list_r = list(joints_list)
+    # 删除连杆链开头连续出现的固定关节
+    while joints_list_r and robot_urdf.joint_map[joints_list_r[0]].type == "fixed":
+        joints_list_r.pop(0)
+    print("忽略开头的连续固定关节后的关节列表 =", joints_list_r)
     for joint_name in joints_list_r:
         joint = robot_urdf.joint_map[joint_name]
         xyz, rpy = robot.get_joint_origin(joint)
@@ -285,7 +303,7 @@ def getJointParametersfromURDF(robot, ee_link="link_ee"):
         xyzs.append(xyz)
         rpys.append(rpy)
         axes.append(axis) # 相对于所在关节的坐标系
-    # 按运动关节数量确定自由度
+    # 按活动关节数量确定自由度
     Nb = sum(robot_urdf.joint_map[name].type != "fixed" for name in joints_list_r)
     print("活动连杆数量Nb =", Nb)
     if len(rpys) == Nb:
@@ -294,6 +312,38 @@ def getJointParametersfromURDF(robot, ee_link="link_ee"):
         axes.append([0.0, 0.0, 0.0])
     print("位姿变换数量 =", len(rpys))
     return Nb, xyzs, rpys, axes
+
+# 按动力学链顺序读取惯性参数，末端刚体只有坐标系没有惯性参数时补零参数槽位
+# body_count表示参与计算的刚体数量(包含末端刚体)
+def getChainInertialParameters(robot, ee_link, body_count):
+    ee_link = resolveEndEffectorLink(robot, ee_link)
+    robot_urdf = robot.urdf
+    root = robot_urdf.get_root()
+    joint_names = list(robot_urdf.get_chain(root, ee_link, links=False))
+    # 删除动力学链开头连续出现的固定关节
+    while joint_names and robot_urdf.joint_map[joint_names[0]].type == "fixed":
+        joint_names.pop(0)
+    # 取得每个关节所连接的子连杆名称
+    child_links = [robot_urdf.joint_map[name].child for name in joint_names]
+    masses, centers, inertias, names = [], [], [], []
+    for link_name in child_links[:body_count]:
+        link = robot_urdf.link_map[link_name]
+        names.append(link_name)
+        if link.inertial is None:
+            masses.append(0.0)
+            centers.append([0.0, 0.0, 0.0])
+            inertias.append(np.zeros((3, 3)))
+        else:
+            masses.append(float(link.inertial.mass))
+            centers.append(link.inertial.origin.xyz)
+            inertias.append(link.inertial.inertia.to_matrix())
+    # 补充虚拟末端参数
+    while len(masses) < body_count:
+        names.append("virtual_terminal")
+        masses.append(0.0)
+        centers.append([0.0, 0.0, 0.0])
+        inertias.append(np.zeros((3, 3)))
+    return (np.asarray(masses), np.asarray(centers).T, np.hstack(inertias), names)
 
 # 通过随机采样，寻找动力学参数之间的线性依赖关系
 def find_dyn_parm_deps(dof, parm_num, regressor_func, samples=10000, seed=0, rtol=None):
@@ -347,4 +397,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

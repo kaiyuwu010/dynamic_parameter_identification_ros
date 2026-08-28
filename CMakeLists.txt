@@ -22,13 +22,11 @@ install(
     src/mujoco_simulation.py
     src/para_regression.py
     src/dynamic_model.py
-    src/CollisionCheck.py
-    src/admittance_test.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
 install(
-  DIRECTORY src/resources urdf
+  DIRECTORY urdf
   DESTINATION share/${PROJECT_NAME}
 )
 

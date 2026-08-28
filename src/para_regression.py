@@ -23,14 +23,16 @@ import pathlib
 import urdf_parser_py.urdf as urdf
 import math
 import copy
-from dynamic_model import TD_2order, TD_list_filter,find_dyn_parm_deps, RNEA_function,DynamicLinearlization,getJointParametersfromURDF
+from dynamic_model import (TD_2order, TD_list_filter, 
+                           find_dyn_parm_deps,
+                           RNEA_function, 
+                           DynamicLinearlization,
+                           getJointParametersfromURDF,
+                           getChainInertialParameters)
 from scipy import signal
 from sklearn.ensemble import AdaBoostClassifier
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.linear_model import LinearRegression
-Order = [0,1,2,3,4,5,6]
-
-
 # 从关节位置计算速度和加速度；样本足够时使用 Savitzky-Golay 滤波。
 def differentiate_positions(positions, dt, *, window_length=11, polyorder=3):
     q = np.asarray(positions, dtype=float)
@@ -104,13 +106,17 @@ def select_important_samples(A, M_fri, b, preds, n_samples):
 
 # 动力学参数估计器
 class Estimator():
-    def __init__(self, path, ee_link="link_eef", node_name = "para_estimatior", dt_ = 5.0, N_ = 100, gravity_vec = [0.0, 0.0, -9.81]) -> None:
+    def __init__(self, path, ee_link=None, node_name = "para_estimatior", dt_ = 5.0, N_ = 100, gravity_vec = [0.0, 0.0, -9.81]) -> None:
         self.dt_ = dt_
         self.N = N_
         # 获取机器人模型
         self.robot = optas.RobotModel(urdf_filename=path, time_derivs=[1])
-        # 获取机器人关节参数
+        # 获取机器人关节参数，Nb是活动关节数
         Nb, xyzs, rpys, axes = getJointParametersfromURDF(self.robot, ee_link=ee_link)
+        self.nj = Nb
+        self.order = list(range(Nb))                 # 活动关节索引列表
+        self.body_count = Nb + 1                     # 加上一个末端固定刚体的总刚体数
+        self.parameter_count = 10 * self.body_count  # 总惯性参数数量
         # 计算机器人动力学模型
         self.dynamics_ = RNEA_function(Nb, 1, rpys, xyzs, axes, gravity_para = cs.DM(gravity_vec))
         # 通过动态线性化方法获取动力学回归矩阵和参数向量
@@ -118,17 +124,9 @@ class Estimator():
         # 读取urdf
         urdf_string_ = pathlib.Path(path).read_text(encoding="utf-8")
         robot = urdf.URDF.from_xml_string(urdf_string_)
-        # 获取每个连杆的质量
-        masses = [link.inertial.mass for link in robot.links if link.inertial is not None]
-        # 为nero补充一个接近零质量的虚拟末端刚体(nero没有末端固定刚体)
-        self.masses_np = np.append(np.asarray(masses[1:], dtype=float), 1e-6)
-        # print("masses = {0}".format(self.masses_np))
-        # 获取每个连杆的质心向量
-        massesCenter = [link.inertial.origin.xyz for link in robot.links if link.inertial is not None]
-        self.massesCenter_np = np.column_stack((np.asarray(massesCenter[1:], dtype=float).T, np.zeros(3)))
-        # 获取每个连杆的惯性参数
-        Inertia = [link.inertial.inertia.to_matrix() for link in robot.links if link.inertial is not None]
-        self.Inertia_np = np.hstack((*Inertia[1:], np.eye(3, dtype=float) * 1e-5))
+        # 获取每个连杆的质量、质心、转动惯量、刚体名(没有末端固定刚体会自动添加一个)
+        self.masses_np, self.massesCenter_np, self.Inertia_np, self.body_names = (
+            getChainInertialParameters(self.robot, ee_link, self.body_count))
         
     @ staticmethod
     def readCsvToList(path):
@@ -149,8 +147,9 @@ class Estimator():
             csv_reader = csv.DictReader(csv_file)
             for row in csv_reader:
                 # print("111 = {0}".format(row.values()))
-                pl = list(row.values())[0:7]
-                tl = list(row.values())[7:14]
+                # nj是活动关节数
+                pl = list(row.values())[0:self.nj]
+                tl = list(row.values())[self.nj:2*self.nj]
                 joint_names = [x.strip() for x in list(row.keys())]
                 pos_l.append([float(x) for x in pl])
                 tau_ext_l.append([float(x) for x in tl])
@@ -164,8 +163,9 @@ class Estimator():
         tau_ext_l = []
         for row in pos_list:
             # print("111 = {0}".format(row.values()))
-            pl = row[0:7]
-            tl = row[7:14]
+            # nj是活动关节数
+            pl = row[0:self.nj]
+            tl = row[self.nj:2*self.nj]
             pos_l.append([float(x) for x in pl])
             tau_ext_l.append([float(x) for x in tl])
         vel_l, _ = differentiate_positions(pos_l, dt)
@@ -178,13 +178,14 @@ class Estimator():
         tau_ext_l = []
         for row in pos_list:
             # print("111 = {0}".format(row.values()))
-            pl = row[0:7]
-            tl = row[7:14]
+            # nj是活动关节数
+            pl = row[0:self.nj]
+            tl = row[self.nj:2*self.nj]
             pos_l.append([float(x) for x in pl])
             tau_ext_l.append([float(x) for x in tl])
         vel_l =[]
         for id in range(len(pos_l)):
-            vel_l.append([0.0, 0.0,0.0, 0.0,0.0, 0.0,0.0])
+            vel_l.append([0.0] * self.nj)
         return pos_l, vel_l, tau_ext_l    
        
     # 把数据以字典行的形式写入CSV文件
@@ -195,7 +196,7 @@ class Estimator():
             csv_writer.writerow({key: value for key, value in zip(keys, values)})
     
     def timer_cb_regressor_physical_con_impt_samp(self, positions, velocities, efforts):
-        Pb, Pd, Kd = find_dyn_parm_deps(7, 80, self.Ymat)
+        Pb, Pd, Kd = find_dyn_parm_deps(self.nj, self.parameter_count, self.Ymat)
         K = Pb.T +Kd @Pd.T
         taus = []
         Y_ = []
@@ -203,10 +204,10 @@ class Estimator():
         if len(positions) < 2:
             raise ValueError("at least two samples are required")
         for k in range(1, len(positions)):
-            q_np = [positions[k][i] for i in Order]
-            qd_np = [velocities[k][i] for i in Order]
-            tau_ext = [efforts[k][i] for i in Order]
-            qdlast_np = [velocities[k-1][i] for i in Order]
+            q_np = [positions[k][i] for i in self.order]
+            qd_np = [velocities[k][i] for i in self.order]
+            tau_ext = [efforts[k][i] for i in self.order]
+            qdlast_np = [velocities[k-1][i] for i in self.order]
             qdd_np = (np.array(qd_np)-np.array(qdlast_np))/0.01
             qdd_np_list = qdd_np.tolist()
             Y_temp = self.Ymat(q_np, qd_np, qdd_np_list) @Pb 
@@ -295,10 +296,10 @@ class Estimator():
             raise ValueError("at least two samples are required")
         # 从第二个样本开始遍历
         for k in range(1, len(positions)):
-            q_np = [positions[k][i] for i in Order]
-            qd_np = [velocities[k][i] for i in Order]
-            tau_ext = [efforts[k][i] for i in Order]
-            qdlast_np = [velocities[k-1][i] for i in Order]
+            q_np = [positions[k][i] for i in self.order]
+            qd_np = [velocities[k][i] for i in self.order]
+            tau_ext = [efforts[k][i] for i in self.order]
+            qdlast_np = [velocities[k-1][i] for i in self.order]
             # 求加速度
             qdd_np = (np.array(qd_np) - np.array(qdlast_np))/0.01
             qdd_np_list = qdd_np.tolist()
@@ -378,7 +379,7 @@ class Estimator():
     def timer_cb_regressor_physical_con(self, positions, velocities, efforts):
         nj = len(positions[0])
         # 获取动力学参数独立矩阵
-        Pb, Pd, Kd = find_dyn_parm_deps(7, 80, self.Ymat)
+        Pb, Pd, Kd = find_dyn_parm_deps(self.nj, self.parameter_count, self.Ymat)
         # 由Y*Pd = Y*Pb*Kd推导得到，K左乘完整惯性参数可以得到最小参数集
         K = Pb.T + Kd @ Pd.T
         # 根据位置、速度、关节力矩，计算回归矩阵、关节力矩向量、摩擦参数回归矩阵
@@ -447,16 +448,16 @@ class Estimator():
     # 使用最小二乘法估计动力学参数
     def timer_cb_regressor(self, positions, velocities, efforts):
         # 获取动力学参数独立性矩阵
-        Pb, Pd, Kd = find_dyn_parm_deps(7, 80, self.Ymat)
+        Pb, Pd, Kd = find_dyn_parm_deps(self.nj, self.parameter_count, self.Ymat)
         K = Pb.T +Kd @ Pd.T
         taus = []
         Y_ = []
         Y_fri = []
         for k in range(1, len(positions)):
-            q_np = [positions[k][i] for i in Order]
-            qd_np = [velocities[k][i] for i in Order]
-            tau_ext = [efforts[k][i] for i in Order]
-            qdlast_np = [velocities[k-1][i] for i in Order]
+            q_np = [positions[k][i] for i in self.order]
+            qd_np = [velocities[k][i] for i in self.order]
+            tau_ext = [efforts[k][i] for i in self.order]
+            qdlast_np = [velocities[k-1][i] for i in self.order]
             qdd_np = (np.array(qd_np)-np.array(qdlast_np))/0.01
             qdd_np = qdd_np.tolist()
             Y_temp = self.Ymat(q_np, qd_np, qdd_np) @Pb 
@@ -479,11 +480,11 @@ class Estimator():
         # estimate_pam = np.linalg.inv(Y_r.T @ Y_r) @ Y_r.T @ taus1
         Y = cs.DM(np.hstack((Y_r, Y_fri1)))
         estimate_pam = scaled_least_squares(np.asarray(Y), taus1)[0]
-        estimate_cs = cs.SX.sym('para', pa_size+14)
+        estimate_cs = cs.SX.sym('para', pa_size + 2 * self.nj)
         obj = cs.sumsqr(taus1 - Y @ estimate_cs)
 
-        lb = -3.0*np.array([1.0]*(pa_size+14))
-        ub = 3.0*np.array([1.0]*(pa_size+14))
+        lb = -3.0 * np.ones(pa_size + 2 * self.nj)
+        ub = 3.0 * np.ones(pa_size + 2 * self.nj)
         print("self.masses_npv", self.masses_np.shape)
         ref_pam = K @ self.PIvector(self.masses_np,self.massesCenter_np,self.Inertia_np).toarray().flatten()
         print("ref_pam = ",ref_pam.shape)
@@ -504,12 +505,12 @@ class Estimator():
     # 使用估计的参数计算的关节力矩与实际测量的关节力矩之间的误差
     def testWithEstimatedParaIDyn(self, positions, velocities, para_gt, para)->None:
         # 获取动力学参数独立性矩阵
-        Pb, Pd, Kd =find_dyn_parm_deps(7,80,self.Ymat)
+        Pb, Pd, Kd = find_dyn_parm_deps(self.nj, self.parameter_count, self.Ymat)
         K = Pb.T +Kd @Pd.T
         tau_ests = []
         es = []
         tau_exts = []
-        filter_list = [TD_2order(T=0.01) for i in range(7)]
+        filter_list = [TD_2order(T=0.01) for _ in range(self.nj)]
         _w1, _h1 =self.massesCenter_np.shape
         _w2, _h2 =self.Inertia_np.shape
         _w0 = len(self.masses_np)
@@ -519,9 +520,9 @@ class Estimator():
         estimate_cs = K @ self.PIvector(para[0:_w0], para[_w0:l1].reshape((_w1,_h1)), para[l1:l].reshape((_w2,_h2)))
         estimate_gt = K @ self.PIvector(para_gt[0:_w0], para_gt[_w0:l1].reshape((_w1,_h1)), para_gt[l1:l].reshape((_w2,_h2)))
         for k in range(1,len(positions),1):
-            q_np = [positions[k][i] for i in Order]
-            qd_np = [velocities[k][i] for i in Order]
-            qdlast_np = [velocities[k-1][i] for i in Order]
+            q_np = [positions[k][i] for i in self.order]
+            qd_np = [velocities[k][i] for i in self.order]
+            qdlast_np = [velocities[k-1][i] for i in self.order]
             qdd_np = (np.array(qd_np) - np.array(qdlast_np))/0.01
             pa_size = Pb.shape[1]
             # 由模型计算各个关节的力矩
@@ -544,12 +545,12 @@ class Estimator():
     # 使用估计的参数计算的关节力矩与实际测量的关节力矩之间的误差
     def testWithEstimatedParaCon(self, positions, velocities, efforts, para)->None:
         # 获取动力学参数独立性矩阵
-        Pb, Pd, Kd = find_dyn_parm_deps(7, 80, self.Ymat)
+        Pb, Pd, Kd = find_dyn_parm_deps(self.nj, self.parameter_count, self.Ymat)
         K = Pb.T +Kd @ Pd.T
         tau_ests = []
         es = []
         # 使用二阶低通滤波器对速度进行滤波
-        filter_list = [TD_2order(T = 0.01) for i in range(7)]
+        filter_list = [TD_2order(T=0.01) for _ in range(self.nj)]
         _w1, _h1 = self.massesCenter_np.shape
         _w2, _h2 = self.Inertia_np.shape
         _w0 = len(self.masses_np)
@@ -558,10 +559,10 @@ class Estimator():
         # 构造最小惯性参数集
         estimate_cs = K @ self.PIvector(para[0:_w0], para[_w0:l1].reshape((_w1,_h1)), para[l1:l].reshape((_w2,_h2)))
         for k in range(1, len(positions), 1):
-            q_np = [positions[k][i] for i in Order]
-            qd_np = [velocities[k][i] for i in Order]
-            tau_ext = [efforts[k][i] for i in Order]
-            qdlast_np = [velocities[k-1][i] for i in Order]
+            q_np = [positions[k][i] for i in self.order]
+            qd_np = [velocities[k][i] for i in self.order]
+            tau_ext = [efforts[k][i] for i in self.order]
+            qdlast_np = [velocities[k-1][i] for i in self.order]
             # 计算角加速度
             qdd_np = (np.array(qd_np) - np.array(qdlast_np))/0.01
             pa_size = Pb.shape[1]
@@ -583,21 +584,23 @@ class Estimator():
     # 使用估计的参数计算的关节力矩与实际测量的关节力矩之间的误差
     def testWithEstimatedPara(self, positions, velocities, efforts, para)->None:
         # 获取动力学参数独立性矩阵
-        Pb, Pd, Kd =find_dyn_parm_deps(7, 80, self.Ymat)
+        Pb, Pd, Kd = find_dyn_parm_deps(self.nj, self.parameter_count, self.Ymat)
         K = Pb.T +Kd @Pd.T
         tau_ests = []
         es = []
         # 使用二阶低通滤波器对速度进行滤波
-        filter_list = [TD_2order(T=0.01) for i in range(7)]
+        filter_list = [TD_2order(T=0.01) for _ in range(self.nj)]
         for k in range(1,len(positions),1):
-            q_np = [positions[k][i] for i in Order]
-            qd_np = [velocities[k][i] for i in Order]
-            tau_ext = [efforts[k][i] for i in Order]
-            qdlast_np = [velocities[k-1][i] for i in Order]
+            q_np = [positions[k][i] for i in self.order]
+            qd_np = [velocities[k][i] for i in self.order]
+            tau_ext = [efforts[k][i] for i in self.order]
+            qdlast_np = [velocities[k-1][i] for i in self.order]
             qdd_np = (np.array(qd_np) - np.array(qdlast_np))/0.01   
             qdd_np = [f(qd_np[id])[1] for id, f in enumerate(filter_list)]
             pa_size = Pb.shape[1]
-            tau_est_model = (self.Ymat(q_np,qd_np,qdd_np) @Pb@  para[:pa_size] + np.diag(np.sign(qd_np)) @ para[pa_size:pa_size+7] + np.diag(qd_np) @ para[pa_size+7:])
+            tau_est_model = (self.Ymat(q_np, qd_np, qdd_np) @ Pb @ para[:pa_size]
+                             + np.diag(np.sign(qd_np)) @ para[pa_size:pa_size+self.nj]
+                             + np.diag(qd_np) @ para[pa_size+self.nj:])
             e= tau_est_model - tau_ext 
             print("error1 = {0}".format(e))
             print("tau_ext = {0}".format(tau_ext))
@@ -615,9 +618,9 @@ class Estimator():
         inertias = para[body_count * 4:body_count * 13].reshape((3, body_count * 3), order="F")
         keys = ["link", "mass", "com_x", "com_y", "com_z", "ixx", "ixy", "ixz", "iyx", "iyy", "iyz", "izx", "izy", "izz"]
         rows = []
-        for i in range(7):
+        for i in range(body_count):
             values = [para[i], *centers[:, i], *inertias[:, i * 3:(i + 1) * 3].reshape(-1)]
-            rows.append([f"link{i + 1}", *[f"{value:.5f}" for value in values]])
+            rows.append([self.body_names[i], *[f"{value:.5f}" for value in values]])
         with path1.open("w", newline="", encoding="utf-8") as csv_file:
             self.save_(csv_file, keys, rows)
             
@@ -641,13 +644,13 @@ def traj_filter(states):
 def compare_traj(states1, states2):
     col1s , col2s = [], []
     l = len(states1[0])
-    fig, axs = plt.subplots(7, 1, figsize=(8, 10))
+    fig, axs = plt.subplots(l, 1, figsize=(8, max(3, 1.4 * l)), squeeze=False)
     for i in range(l):
         print("states = {0}".format(states2[i]))
         col1s.append([float(state[i]) for state in states1])
         col2s.append([float(state[i]) for state in states2])
-        axs[i].plot(col1s[i])
-        axs[i].plot(col2s[i])
+        axs[i, 0].plot(col1s[i])
+        axs[i, 0].plot(col2s[i])
     plt.subplots_adjust(hspace=0.5)
     plt.show()
 

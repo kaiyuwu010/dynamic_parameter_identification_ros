@@ -25,7 +25,12 @@ import open3d as o3d
 from sklearn.mixture import GaussianMixture
 
 import casadi as cs
-from dynamic_model import find_dyn_parm_deps, RNEA_function, DynamicLinearlization, getJointParametersfromURDF
+from dynamic_model import (find_dyn_parm_deps, 
+                           RNEA_function,
+                           DynamicLinearlization, 
+                           getJointParametersfromURDF,
+                           getChainInertialParameters,
+                           resolveEndEffectorLink)
 
 # 检查数值或CasADi计算结果中是否包含NaN
 def contains_nan(x):
@@ -130,10 +135,31 @@ class TrajGeneration(Node):
         gv = gravity_vector
         self.initial_model_params(path, gv)
     # 根据URDF文件路径和重力向量初始化机器人模型、动力学函数和回归矩阵
-    def initial_model_params(self, path, gv, ee_link = "link7"):
+    def initial_model_params(self, path, gv, ee_link=None):
         self.robot = optas.RobotModel(xacro_filename = path, time_derivs=[1],)
+        ee_link = resolveEndEffectorLink(self.robot, ee_link)
         # 从URDF中提取关节参数
         Nb, xyzs, rpys, axes = getJointParametersfromURDF(self.robot, ee_link)
+        self.nj = Nb
+        self.body_count = Nb + 1
+        self.parameter_count = 10 * self.body_count
+        chain_joints = self.robot.urdf.get_chain(
+            self.robot.urdf.get_root(), ee_link, links=False
+        )
+        active_joints = [self.robot.urdf.joint_map[name] for name in chain_joints
+                         if self.robot.urdf.joint_map[name].type != "fixed"]
+        self.q_lower = np.asarray([
+            joint.limit.lower if joint.limit and joint.limit.lower is not None else -np.pi
+            for joint in active_joints
+        ], dtype=float)
+        self.q_upper = np.asarray([
+            joint.limit.upper if joint.limit and joint.limit.upper is not None else np.pi
+            for joint in active_joints
+        ], dtype=float)
+        self.q_velocity = np.asarray([
+            joint.limit.velocity if joint.limit and joint.limit.velocity is not None else 6.2
+            for joint in active_joints
+        ], dtype=float)
         # 构造逆动力学函数
         self.dynamics_ = RNEA_function(Nb, 1, rpys, xyzs, axes, gravity_para=cs.DM(gv))
         # 构造回归矩阵和完整动力学参数向量
@@ -142,12 +168,9 @@ class TrajGeneration(Node):
         urdf_string_ = xacro.process(path)
         robot = urdf.URDF.from_xml_string(urdf_string_)
         # 保存各连杆的质量、质心位置和惯性矩阵
-        masses = [link.inertial.mass for link in robot.links if link.inertial is not None]
-        self.masses_np = np.array(masses[1:])
-        massesCenter = [link.inertial.origin.xyz for link in robot.links if link.inertial is not None]
-        self.massesCenter_np = np.array(massesCenter[1:]).T
-        Inertia = [link.inertial.inertia.to_matrix() for link in robot.links if link.inertial is not None]
-        self.Inertia_np = np.hstack(tuple(Inertia[1:]))
+        self.masses_np, self.massesCenter_np, self.Inertia_np, self.body_names = (
+            getChainInertialParameters(self.robot, ee_link, self.body_count)
+        )
         
     # 读取带表头CSV，忽略列名并按文件中的列顺序返回浮点行
     @ staticmethod
@@ -191,61 +214,64 @@ class TrajGeneration(Node):
     def generate_opt_traj_Link(self, Ff,                                              # 傅立叶轨迹基频，表示每秒几个周期，单位hz
                                sampling_rate,                                         # 采样频率，表示每秒采集多少点，单位hz
                                Rank=5,                                                # 傅立叶谐波阶次
-                               q_min = [-6.2, -6.2, -6.2, -6.2, -6.2, -6.2, -6.2],    # 关节范围下限，单位rad
-                               q_max = [ 6.2,  6.2,  6.2,  6.2,  6.2,  6.2,  6.2],    # 关节范围上限，单位rad 
-                               q_vmin = [-6.2, -6.2, -6.2, -6.2, -6.2, -6.2, -6.2],   # 关节速度下限，单位rad/s
-                               q_vmax = [ 6.2,  6.2,  6.2,  6.2,  6.2,  6.2,  6.2],   # 关节速度上限，单位rad/s
+                               q_min=None, q_max=None,
+                               q_vmin=None, q_vmax=None,
                                f_path = None, g_path=None, 
-                               bias = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]):
+                               bias=None):
         # 输入检查
         if Ff <= 0.0 or sampling_rate <= 0.0:
             raise ValueError("基频和采样率必须为正")
         if Rank < 2:
             raise ValueError("谐波阶数至少为 2")
-        q_min = np.asarray(q_min, dtype=float)
-        q_max = np.asarray(q_max, dtype=float)
-        q_vmin = np.asarray(q_vmin, dtype=float)
-        q_vmax = np.asarray(q_vmax, dtype=float)
-        bias = np.asarray(bias, dtype=float)
+        nj = self.nj
+        q_min = self.q_lower.copy() if q_min is None else np.asarray(q_min, dtype=float)
+        q_max = self.q_upper.copy() if q_max is None else np.asarray(q_max, dtype=float)
+        q_vmin = -self.q_velocity if q_vmin is None else np.asarray(q_vmin, dtype=float)
+        q_vmax = self.q_velocity.copy() if q_vmax is None else np.asarray(q_vmax, dtype=float)
+        # 默认使用最小和最大关节位置的中点作为偏置位置
+        bias = 0.5 * (q_min + q_max) if bias is None else np.asarray(bias, dtype=float)
+        print("偏置为: ", bias)
         for name, values in (("q_min", q_min), ("q_max", q_max), ("q_vmin", q_vmin), ("q_vmax", q_vmax), ("bias", bias),):
-            if values.shape != (7,):
-                raise ValueError(f"{name} 必须包含 7 个值")
+            if values.shape != (nj,):
+                raise ValueError(f"{name} 必须包含{nj}个值")
+        self.trajectory_bias = bias.copy()
         # 位置幅值约束
         position_margins = np.minimum(q_max - bias, bias - q_min)
         # 速度幅值约束
         velocity_margins = np.minimum(q_vmax, -q_vmin)
         if np.any(position_margins <= 0.0):
-            raise ValueError("bias must lie strictly inside every joint position bound")
+            raise ValueError("位置幅值约束必须大于0")
         if np.any(velocity_margins <= 0.0):
-            raise ValueError("joint velocity bounds must contain zero")
+            raise ValueError("速度幅值约束必须大于0")
         # 单周期采样点数
         pointsNum = int(sampling_rate / Ff)
         if pointsNum < 1:
             raise ValueError("sampling_rate / Ff must be at least 1")
         print("一个周期内的样本数:", pointsNum)
         # 初始化傅立叶系数变量
-        x = cs.MX.sym('x', 2 * Rank * 7, 1)
-        ab = cs.reshape(x, 2 * Rank, 7)
+        x = cs.MX.sym('x', 2 * Rank * nj, 1)
+        ab = cs.reshape(x, 2 * Rank, nj)
         a = ab[:Rank, :]
         b = ab[Rank:, :]
         # 求最小参数集提取矩阵
-        Pb, _, _ = find_dyn_parm_deps(7, 80, self.Ymat)
+        Pb, _, _ = find_dyn_parm_deps(nj, self.parameter_count, self.Ymat)
         Pb = cs.DM(Pb)
-        bias_dm = cs.reshape(cs.DM(bias), 7, 1)
-        # 当前按你的要求关闭碰撞约束。将这里替换为非空点集即可恢复避碰项。
+        bias_dm = cs.reshape(cs.DM(bias), nj, 1)
+        # ============================== 碰撞约束 ==============================
         points = np.empty((0, 3))
         print("凸包点数:", len(points))
         vfs_fun = []
         for point in points:
             for link_index in range(2, 6):
                 vfs_fun.append(getConstraintsinJointSpace(self.robot, point_coord=point, base_link="link_" + str(link_index), base_joint_name="A" + str(link_index),))
+        # =====================================================================
         Y_blocks = []  # 最小参数集对应的回归矩阵
         pfun_list = [] # 各个采样点的碰撞约束
         for sample_index in range(pointsNum):
             tc = sample_index / sampling_rate
             q = bias_dm           # 从零偏开始叠加傅立叶轨迹
-            qd = cs.MX.zeros(7, 1)
-            qdd = cs.MX.zeros(7, 1)
+            qd = cs.MX.zeros(nj, 1)
+            qdd = cs.MX.zeros(nj, 1)
             for harmonic_index in range(Rank):
                 wl = (harmonic_index + 1) * 2.0 * math.pi * Ff
                 a_l = a[harmonic_index, :].T
@@ -259,12 +285,12 @@ class TrajGeneration(Node):
                 pfun_list.append(vf_fun(q))
         Y = cs.vertcat(*Y_blocks)
         # 保留原有的三组线性周期条件及位置/速度幅值约束，只把表达式类型改为MX
-        a_eq1 = [0.0] * 7
-        a_eq2 = [0.0] * 7
-        b_eq1 = [0.0] * 7
-        position_amplitude = [0.0] * 7
-        velocity_amplitude = [0.0] * 7
-        for joint_index in range(7):
+        a_eq1 = [0.0] * nj
+        a_eq2 = [0.0] * nj
+        b_eq1 = [0.0] * nj
+        position_amplitude = [0.0] * nj
+        velocity_amplitude = [0.0] * nj
+        for joint_index in range(nj):
             for harmonic_index in range(Rank):
                 order = harmonic_index + 1
                 wl = order * 2.0 * math.pi * Ff
@@ -278,8 +304,8 @@ class TrajGeneration(Node):
                 velocity_amplitude[joint_index] += amplitude                            # 速度幅值
         # 约束和上下界
         g = cs.vertcat(*(a_eq1 + a_eq2 + b_eq1 + position_amplitude + velocity_amplitude + pfun_list))
-        lbg = cs.DM([0.0] * (35 + len(pfun_list)))                                                                   # 矩阵形状(35 + n, 1)
-        ubg = cs.DM([0.0] * 21 + position_margins.tolist() + velocity_margins.tolist() + [1e10] * len(pfun_list))    # 矩阵形状(21 + p + v + n, 1)
+        lbg = cs.DM([0.0] * (5 * nj + len(pfun_list)))
+        ubg = cs.DM([0.0] * (3 * nj) + position_margins.tolist() + velocity_margins.tolist() + [1e10] * len(pfun_list))
         # A_reg必须正定
         A = Y.T @ Y
         identity = cs.DM.eye(A.size1())
@@ -295,8 +321,8 @@ class TrajGeneration(Node):
         Y_x_fun = cs.Function('Y_x_fun', [x], [Y])          # 把计算回归矩阵Y的符号表达式封装为函数，输入傅立叶系数x
         g_x_fun = cs.Function('g_x_fun', [x], [g])          # 把计算约束g的符号表达式封装为函数，输入傅立叶系数x
         A_x_fun = cs.Function('A_x_fun', [x], [A_reg])      # 把计算信息矩阵A_reg的符号表达式封装为函数，输入傅立叶系数x
-        a_eval = cs.MX.sym('a_eval', Rank, 7)
-        b_eval = cs.MX.sym('b_eval', Rank, 7)
+        a_eval = cs.MX.sym('a_eval', Rank, nj)
+        b_eval = cs.MX.sym('b_eval', Rank, nj)
         x_eval = cs.vec(cs.vertcat(a_eval, b_eval))
         Y_fun = cs.Function('Y_fun', [a_eval, b_eval], [Y_x_fun(x_eval)])  # 把计算回归矩阵Y的符号表达式封装为函数，输入傅立叶系数a、b
         fc = cs.Function('fc', [a_eval, b_eval], [A_x_fun(x_eval)])        # 把计算信息矩阵A_reg的符号表达式封装为函数，输入傅立叶系数a、b
@@ -305,7 +331,7 @@ class TrajGeneration(Node):
         solver_options = {'expand': False, 
                           'verbose': False, 
                           'ipopt': {'max_iter': 1000, 
-                                    "tol": 1e-6,
+                                    "tol": 1e-4,
                                     "acceptable_tol": 1e-4,
                                     "acceptable_iter": 15,
                                     "acceptable_dual_inf_tol": 1e-2,
@@ -322,8 +348,8 @@ class TrajGeneration(Node):
         print("MX 函数节点数: Y = {}, g = {}".format(Y_x_fun.n_nodes(), g_x_fun.n_nodes()))
         # 生成满足三组线性等式且位于幅值边界内的非零初值
         def make_initial_guess(rng, coefficient_scale=0.2):
-            a0 = rng.uniform(-coefficient_scale, coefficient_scale, size=(Rank, 7))
-            b0 = rng.uniform(-coefficient_scale, coefficient_scale, size=(Rank, 7))
+            a0 = rng.uniform(-coefficient_scale, coefficient_scale, size=(Rank, nj))
+            b0 = rng.uniform(-coefficient_scale, coefficient_scale, size=(Rank, nj))
             harmonic_orders = np.arange(1, Rank + 1, dtype=float)
             a0 -= np.mean(a0, axis=0, keepdims=True)
             constraints_b = np.vstack((1.0 / harmonic_orders, harmonic_orders))
@@ -332,7 +358,7 @@ class TrajGeneration(Node):
             angular_frequencies = 2.0 * math.pi * Ff * harmonic_orders
             position_sum = np.sum(np.hypot(a0, b0) / angular_frequencies[:, None], axis=0)
             velocity_sum = np.sum(np.hypot(a0, b0), axis=0)
-            for joint_index in range(7):
+            for joint_index in range(nj):
                 scale = 1.0
                 if position_sum[joint_index] > 0.0:
                     scale = min(scale, 0.5 * position_margins[joint_index] / position_sum[joint_index])
@@ -354,7 +380,7 @@ class TrajGeneration(Node):
         sol = S(x0=init_x0, lbg=lbg, ubg=ubg)
         stats = S.stats()
         status = stats.get('return_status', 'unknown')
-        print("IPOPT状态:", status)
+        print("IPOPT状态: ", status)
         
         candidate_g = np.asarray(g_x_fun(sol["x"]).full(), dtype=float, ).reshape(-1)
         lbg_np = np.asarray(lbg.full(), dtype=float).reshape(-1)
@@ -363,11 +389,11 @@ class TrajGeneration(Node):
         upper_violation = np.maximum(candidate_g - ubg_np, 0.0)
         violations = np.maximum(lower_violation, upper_violation)
         names = (
-            [f"position_eq_J{i + 1}" for i in range(7)]
-            + [f"velocity_eq_J{i + 1}" for i in range(7)]
-            + [f"acceleration_eq_J{i + 1}" for i in range(7)]
-            + [f"position_amplitude_J{i + 1}" for i in range(7)]
-            + [f"velocity_amplitude_J{i + 1}" for i in range(7)]
+            [f"position_eq_J{i + 1}" for i in range(nj)]
+            + [f"velocity_eq_J{i + 1}" for i in range(nj)]
+            + [f"acceleration_eq_J{i + 1}" for i in range(nj)]
+            + [f"position_amplitude_J{i + 1}" for i in range(nj)]
+            + [f"velocity_amplitude_J{i + 1}" for i in range(nj)]
         )
         print("最大约束违反:")
         for index in np.argsort(violations)[::-1][:10]:
@@ -377,9 +403,10 @@ class TrajGeneration(Node):
                 f"bounds=[{lbg_np[index]:.8g}, {ubg_np[index]:.8g}], "
                 f"violation={violations[index]:.8g}"
             )         
-        # if not stats.get('success', False):
+        if not stats.get('success', False):
+            print("IPOPT未成功收敛!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         #     raise RuntimeError(f"IPOPT未成功收敛: {status}")
-        ab_best = np.asarray(sol['x'].full(), dtype=float).reshape((2 * Rank, 7), order='F')
+        ab_best = np.asarray(sol['x'].full(), dtype=float).reshape((2 * Rank, nj), order='F')
         a_best = ab_best[:Rank, :]
         b_best = ab_best[Rank:, :]
         final_g = np.asarray(g_x_fun(sol['x']).full(), dtype=float).reshape(-1)
@@ -849,11 +876,15 @@ class TrajGeneration(Node):
     # 根据傅立叶系数、基频、采样率等参数生成傅立叶轨迹列表
     def generateToList(self, a, b, Ff, sampling_rate, scale=1.0, bias=None,):
         assert a.shape == b.shape
+        rank, nj = a.shape
         if bias is None:
-            bias = np.zeros(7)
-        fourierInstance1 = FourierSeries(Rank=a.shape[0], channel=a.shape[1], bias=np.asarray(bias, dtype=float).tolist(), ff=Ff,)
-        cs_a = cs.SX.sym('ca', 5, 7)
-        cs_b = cs.SX.sym('cb', 5, 7)
+            bias = getattr(self, "trajectory_bias", np.zeros(nj))
+        bias = np.asarray(bias, dtype=float)
+        if bias.shape != (nj,):
+            raise ValueError(f"bias必须包含{nj}个值")
+        fourierInstance1 = FourierSeries(Rank=rank, channel=nj, bias=bias.tolist(), ff=Ff,)
+        cs_a = cs.SX.sym('ca', rank, nj)
+        cs_b = cs.SX.sym('cb', rank, nj)
         t = cs.SX.sym('tt', 1)
         fourierF = fourierInstance1.FourierFunction(t, cs_a, cs_b,'f2')
         fourier = fourierF(cs_a, cs_b, t)
@@ -862,9 +893,7 @@ class TrajGeneration(Node):
         _fDot = optas.Function('fund', [cs_a, cs_b, t], fourierDot)
         # 一个周期的点数，终点不写入
         pointsNum = int(sampling_rate/Ff)
-        keys = ["关节0位置", "关节1位置", "关节2位置", "关节3位置", "关节4位置", "关节5位置", "关节6位置", 
-                "关节0速度", "关节1速度", "关节2速度", "关节3速度", "关节4速度", "关节5速度", "关节6速度"]
-        keys = ["时间戳"] + keys
+        keys = (["时间戳"] + [f"关节{i + 1}位置" for i in range(nj)] + [f"关节{i + 1}速度" for i in range(nj)])
         values_list = []
         for k in range(pointsNum):
             # 采样时间
@@ -1008,7 +1037,7 @@ class TrajGeneration(Node):
         raise ValueError("Run to here {0}".format(output))
 
 class TrajGenerationUsrPath(TrajGeneration):
-    def __init__(self, path=None, node_name = "para_estimatior", dt_ = 5.0, N_ = 100, gravity_vector=[0, 0, -9.81], ee_link = "link7", ) -> None:
+    def __init__(self, path=None, node_name = "para_estimatior", dt_ = 5.0, N_ = 100, gravity_vector=[0, 0,-9.81], ee_link=None) -> None:
         Node.__init__(self, node_name = node_name)
         if(path is None):
             raise ValueError("This Class need a pathdefine")
@@ -1029,17 +1058,16 @@ def main(args=None):
     sampling_rate = 100.0
     # sampling_rate = 20.0
     sampling_rate = 5.0  
-    #   bias = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    bias = [0.0, 0.0, 0.0, 2.5, 0.0, 0.7, 0.0]  # xarm7机械臂测试零偏
+    bias = None  # 默认使用URDF关节范围中点，长度随关节数自动变化
     a, b, fc = paraEstimator.generate_opt_traj_Link(Ff = Ff,                                                     # 每秒运行周期数
                                                   sampling_rate = sampling_rate,                                 # 每秒采样数
                                                   bias = bias,                 
-                                                #   q_min = [-6.28, -2.06, -6.28, -0.19, -6.28, -1.69, -6.28],     # xarm7机械臂真实限位
-                                                #   q_max = [ 6.28,  2.06,  6.28,  3.93,  6.28,  3.14,  6.28])     # xarm7机械臂真实限位
-                                                  q_min = [-6.28, -2.06, -6.28,  1.00, -6.28, -1.69, -6.28],     # xarm7机械臂测试限位
-                                                  q_max = [ 6.28,  2.06,  6.28,  3.93,  6.28,  3.14,  6.28])     # xarm7机械臂测试限位
-                                                #   q_min = [-2.7, -1.74, -2.75, -1.01, -2.75, -0.73, -1.571],   # nero机械臂真实限位
-                                                #   q_max = [ 2.7,  1.74,  2.75,  1.01,  2.75,  0.95,  1.571])   # nero机械臂真实限位
+                                                  q_min = [-6.28,  0.00, -6.28, -0.28, -6.28, -3.14, -6.28],     # xarm7机械臂测试限位
+                                                  q_max = [ 6.28,  6.28,  6.28,  6.28,  6.28,  3.14,  6.28],     # xarm7机械臂测试限位
+                                                  q_vmin = [-6.28, -6.28, -3.14, -3.14, -3.14, -3.14, -3.14],     # xarm7机械臂测试限位
+                                                  q_vmax = [ 6.28,  6.28,  3.14,  3.14,  3.14,  3.14,  3.14])     # xarm7机械臂测试限位
+                                                #   q_min = None,
+                                                #   q_max = None)
                                                 #   q_min = [-2.7, -2.0, -2.75, -1.6, -2.75, -1.8, -1.7],        # nero机械臂测试限位
                                                 #   q_max = [ 2.7,  2.0,  2.75,  1.6,  2.75,  1.8,  1.7])        # nero机械臂测试限位
     print("a = {0} \n b = {1}".format(a, b))
