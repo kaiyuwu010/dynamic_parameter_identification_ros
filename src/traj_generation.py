@@ -1016,7 +1016,7 @@ class TrajGenerationUsrPath(TrajGeneration):
         gv = gravity_vector
         self.initial_model_params(_path, gv, ee_link)
 
-def mainO(args=None):
+def main(args=None):
     rclpy.init(args=args)
     # 根据包名获取share目录下的完整路径
     model_path = os.path.join(get_package_share_directory("xarm_description"), "urdf", "xarm7_description.urdf",)
@@ -1055,38 +1055,5 @@ def mainO(args=None):
         print("条件数为 = ", conditional_num)
     rclpy.shutdown()
 
-
-def main(args=None):
-    rclpy.init(args=args)
-    paraEstimator = TrajGeneration()
-    Ff = 0.1
-    sampling_rate = 100.0
-    sampling_rate_inoptimization = 20.0
-    theta_range = [-0.5233, -0.2, 0.0]
-    conditional_num_best = 1000000000.0
-    # 对前两个关节的候选偏置做笛卡尔积搜索。
-    for theta1 in theta_range:
-        for theta2 in theta_range:
-            a,b,fc = paraEstimator.generate_opt_traj_Link(Ff = Ff,sampling_rate = sampling_rate_inoptimization,bias = [theta1, theta2, 0.0, 0.0, 0.0, 0.0, 0.0])
-            print("a = {0} \n b = {1}".format(a,b))
-            eigenvalues = np.linalg.eigvalsh(np.asarray(fc(a, b).full(), dtype=float))
-            print("fc = ",eigenvalues)
-            conditional_num = np.sqrt(eigenvalues[-1] / eigenvalues[0])
-            if conditional_num<conditional_num_best:
-                conditional_num_best = conditional_num
-                best_theta = [theta1, theta2]
-                a_best = a
-                b_best = b
-    print("conditional_num_best = ",conditional_num_best)
-    print("best_theta = ",best_theta)
-    ret = paraEstimator.generateToCsv(a_best, b_best, Ff = Ff, sampling_rate=sampling_rate)
-    if ret:
-        print("Done! 轨迹已生成（当前碰撞约束关闭）")
-        eigenvalues = np.linalg.eigvalsh(np.asarray(fc(a_best, b_best).full(), dtype=float))
-        print("fc = ",eigenvalues)
-        print("a = ",a_best)
-        print("b = ",b_best)
-    rclpy.shutdown()
-
 if __name__ == "__main__":
-    mainO()
+    main()
