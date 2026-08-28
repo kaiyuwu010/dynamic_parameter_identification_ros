@@ -142,5 +142,7 @@ if __name__ == "__main__":
     package_dir = get_package_share_directory("nero_description")
     urdf_path = os.path.join(package_dir, "urdf", "nero_description.urdf")
     trajectory_path = "/tmp/target_joint_states.csv"
+    project_dir = Path(__file__).resolve().parent.parent
+    output_path = project_dir / "src" / "test_data" / "mujoco_robot_data.csv"
     simulator = MuJoCoTrajectorySim(urdf_path, trajectory_path, timestep=0.01)
-    simulator.run_sim("mujoco_robot_data.csv")
+    simulator.run_sim(output_path)

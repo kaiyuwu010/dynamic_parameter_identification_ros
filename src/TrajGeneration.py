@@ -269,21 +269,28 @@ class TrajGeneration(Node):
                 wl = order * 2.0 * math.pi * Ff
                 a_value = a[harmonic_index, joint_index]
                 b_value = b[harmonic_index, joint_index]
-                a_eq1[joint_index] += b_value / order                       # t=0时的位置，q(0) = 0 
-                a_eq2[joint_index] += a_value                               # t=0时的速度，dotq(0) = 0
-                b_eq1[joint_index] += b_value * order                       # t=0时的加速度，ddotq(0) = 0 
-                amplitude = cs.sqrt(a_value * a_value + b_value * b_value)  # asinx - bcosx = sqrt{a^2+b^2}sin(x-&)，所以幅值最大为a^2+b^2
-                position_amplitude[joint_index] += amplitude / wl           # 位置幅值
-                velocity_amplitude[joint_index] += amplitude                # 速度幅值
+                a_eq1[joint_index] += b_value / order                                   # t=0时的位置，q(0) = 0 
+                a_eq2[joint_index] += a_value                                           # t=0时的速度，dotq(0) = 0
+                b_eq1[joint_index] += b_value * order                                   # t=0时的加速度，ddotq(0) = 0 
+                amplitude = cs.sqrt(a_value * a_value + b_value * b_value + 1e-12)      # asinx - bcosx = sqrt{a^2+b^2}sin(x-&)，所以幅值最大为a^2+b^2
+                position_amplitude[joint_index] += amplitude / wl                       # 位置幅值
+                velocity_amplitude[joint_index] += amplitude                            # 速度幅值
         # 约束和上下界
         g = cs.vertcat(*(a_eq1 + a_eq2 + b_eq1 + position_amplitude + velocity_amplitude + pfun_list))
         lbg = cs.DM([0.0] * (35 + len(pfun_list)))                                                                   # 矩阵形状(35 + n, 1)
         ubg = cs.DM([0.0] * 21 + position_margins.tolist() + velocity_margins.tolist() + [1e10] * len(pfun_list))    # 矩阵形状(21 + p + v + n, 1)
         # A_reg必须正定
         A = Y.T @ Y
-        regularization = 1e-6
-        A_reg = A + regularization * cs.DM.eye(A.size1())
-        f = cs.norm_fro(A_reg) * cs.norm_fro(cs.solve(A_reg, cs.DM.eye(A.size1()))) # cs.solve比cs.inv更稳定
+        identity = cs.DM.eye(A.size1())
+        # 根据 A 自身尺度设置正则化，避免固定 1e-6 太大或太小
+        mean_diagonal = cs.trace(A) / A.size1()
+        regularization = 1e-6 * (mean_diagonal + 1.0)
+        A_reg = A + regularization * identity
+        # regularization = 1e-6
+        # A_reg = A + regularization * cs.DM.eye(A.size1())
+        # A-optimal：最小化参数估计方差
+        f = (cs.trace(cs.solve(A_reg, identity)) * mean_diagonal / A.size1())
+        # f = cs.norm_fro(A_reg) * cs.norm_fro(cs.solve(A_reg, cs.DM.eye(A.size1()))) # cs.solve比cs.inv更稳定
         Y_x_fun = cs.Function('Y_x_fun', [x], [Y])          # 把计算回归矩阵Y的符号表达式封装为函数，输入傅立叶系数x
         g_x_fun = cs.Function('g_x_fun', [x], [g])          # 把计算约束g的符号表达式封装为函数，输入傅立叶系数x
         A_x_fun = cs.Function('A_x_fun', [x], [A_reg])      # 把计算信息矩阵A_reg的符号表达式封装为函数，输入傅立叶系数x
@@ -294,18 +301,30 @@ class TrajGeneration(Node):
         fc = cs.Function('fc', [a_eval, b_eval], [A_x_fun(x_eval)])        # 把计算信息矩阵A_reg的符号表达式封装为函数，输入傅立叶系数a、b
         # 求解问题
         problem = {'x': x, 'f': f, 'g': g}
-        solver_options = {'expand': False, 'verbose': False, 'ipopt': {'max_iter': 50000, 'hessian_approximation': 'limited-memory', "print_level": 0,},}
+        solver_options = {'expand': False, 
+                          'verbose': False, 
+                          'ipopt': {'max_iter': 1000, 
+                                    "tol": 1e-6,
+                                    "acceptable_tol": 1e-4,
+                                    "acceptable_iter": 15,
+                                    "acceptable_dual_inf_tol": 1e-2,
+                                    "constr_viol_tol": 1e-3,
+                                    "hessian_approximation": "limited-memory",
+                                    "limited_memory_max_history": 20,
+                                    "mu_strategy": "adaptive",
+                                    "nlp_scaling_method": "gradient-based",
+                                    "bound_relax_factor": 1e-8,
+                                    "linear_solver": "mumps",
+                                    "print_level": 5,
+                                   },}
         S = cs.nlpsol('S', 'ipopt', problem, solver_options)
         print("MX 函数节点数: Y = {}, g = {}".format(Y_x_fun.n_nodes(), g_x_fun.n_nodes()))
         # 生成满足三组线性等式且位于幅值边界内的非零初值
-        def make_initial_guess(rng, coefficient_scale=0.03):
+        def make_initial_guess(rng, coefficient_scale=0.2):
             a0 = rng.uniform(-coefficient_scale, coefficient_scale, size=(Rank, 7))
             b0 = rng.uniform(-coefficient_scale, coefficient_scale, size=(Rank, 7))
             harmonic_orders = np.arange(1, Rank + 1, dtype=float)
-            # qd(0) = 0: sum_l(a_l) = 0。
             a0 -= np.mean(a0, axis=0, keepdims=True)
-            # q(0) = bias 且 qdd(0) = 0:
-            # sum_l(b_l / order_l) = 0，sum_l(order_l * b_l) = 0。
             constraints_b = np.vstack((1.0 / harmonic_orders, harmonic_orders))
             projection_b = constraints_b.T @ np.linalg.pinv(constraints_b @ constraints_b.T)
             b0 -= projection_b @ (constraints_b @ b0)
@@ -315,9 +334,9 @@ class TrajGeneration(Node):
             for joint_index in range(7):
                 scale = 1.0
                 if position_sum[joint_index] > 0.0:
-                    scale = min(scale, 0.8 * position_margins[joint_index] / position_sum[joint_index])
+                    scale = min(scale, 0.5 * position_margins[joint_index] / position_sum[joint_index])
                 if velocity_sum[joint_index] > 0.0:
-                    scale = min(scale, 0.8 * velocity_margins[joint_index] / velocity_sum[joint_index])
+                    scale = min(scale, 0.5 * velocity_margins[joint_index] / velocity_sum[joint_index])
                 a0[:, joint_index] *= scale
                 b0[:, joint_index] *= scale
             # CasADi 的 reshape/vec 是列主序；NumPy 这里必须明确 order='F'。
@@ -335,6 +354,29 @@ class TrajGeneration(Node):
         stats = S.stats()
         status = stats.get('return_status', 'unknown')
         print("IPOPT状态:", status)
+        
+        candidate_g = np.asarray(g_x_fun(sol["x"]).full(), dtype=float, ).reshape(-1)
+        lbg_np = np.asarray(lbg.full(), dtype=float).reshape(-1)
+        ubg_np = np.asarray(ubg.full(), dtype=float).reshape(-1)
+        lower_violation = np.maximum(lbg_np - candidate_g, 0.0)
+        upper_violation = np.maximum(candidate_g - ubg_np, 0.0)
+        violations = np.maximum(lower_violation, upper_violation)
+        names = (
+            [f"position_eq_J{i + 1}" for i in range(7)]
+            + [f"velocity_eq_J{i + 1}" for i in range(7)]
+            + [f"acceleration_eq_J{i + 1}" for i in range(7)]
+            + [f"position_amplitude_J{i + 1}" for i in range(7)]
+            + [f"velocity_amplitude_J{i + 1}" for i in range(7)]
+        )
+        print("最大约束违反:")
+        for index in np.argsort(violations)[::-1][:10]:
+            print(
+                f"{names[index]}: "
+                f"value={candidate_g[index]:.8g}, "
+                f"bounds=[{lbg_np[index]:.8g}, {ubg_np[index]:.8g}], "
+                f"violation={violations[index]:.8g}"
+            )         
+        
         if not stats.get('success', False):
             raise RuntimeError(f"IPOPT未成功收敛: {status}")
         ab_best = np.asarray(sol['x'].full(), dtype=float).reshape((2 * Rank, 7), order='F')
@@ -953,12 +995,11 @@ class TrajGenerationUsrPath(TrajGeneration):
 def mainO(args=None):
     rclpy.init(args=args)
     # 根据包名获取share目录下的完整路径
-    # model_path = os.path.join(get_package_share_directory("xarm_description"), "urdf", "xarm_device.urdf.xacro",)
-    model_path = os.path.join(get_package_share_directory("nero_description"), "urdf", "nero_description.urdf",)
+    model_path = os.path.join(get_package_share_directory("xarm_description"), "urdf", "xarm7_description.urdf",)
+    # model_path = os.path.join(get_package_share_directory("nero_description"), "urdf", "nero_description.urdf",)
     print("urdf路径 = ", model_path)
-    # XArm 使用世界坐标系竖直向下的标准重力向量。
-    # paraEstimator = TrajGenerationUsrPath(path = model_path, gravity_vector = [0, 0, -9.81], ee_link = "link_eef")
-    paraEstimator = TrajGenerationUsrPath(path = model_path, gravity_vector = [0, 0, -9.81], ee_link = "link7")
+    paraEstimator = TrajGenerationUsrPath(path = model_path, gravity_vector = [0, 0, -9.81], ee_link = "link_eef")
+    # paraEstimator = TrajGenerationUsrPath(path = model_path, gravity_vector = [0, 0, -9.81], ee_link = "link7")
     # 基频0.1Hz，优化时降采样，导出时使用100Hz
     Ff = 0.1
     sampling_rate = 100.0
@@ -969,6 +1010,10 @@ def mainO(args=None):
                                                   bias = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
                                                   q_min = [-6.2, -6.2, -6.2, -6.2, -6.2, -6.2, -6.2],
                                                   q_max = [6.2, 6.2, 6.2, 6.2, 6.2, 6.2, 6.2])
+                                                #   q_min = [-2.7, -1.74, -2.75, -1.01, -2.75, -0.73, -1.571],   # nero机械臂真实限位
+                                                #   q_max = [ 2.7,  1.74,  2.75,  1.01,  2.75,  0.95,  1.571])   # nero机械臂真实限位
+                                                #   q_min = [-2.7, -2.0, -2.75, -1.6, -2.75, -1.8, -1.7],   # nero机械臂测试限位
+                                                #   q_max = [ 2.7,  2.0,  2.75,  1.6,  2.75,  1.8,  1.7])   # nero机械臂测试限位
     print("a = {0} \n b = {1}".format(a, b))
     # 保存轨迹时采样率，根据机械臂控制频率决定
     gen_traj_sampling_rate = 100

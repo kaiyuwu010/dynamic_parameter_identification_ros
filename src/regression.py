@@ -66,30 +66,31 @@ def select_important_samples(A, M_fri, b, preds, n_samples):
 class Estimator():
     def __init__(self, node_name = "para_estimatior", dt_ = 5.0, N_ = 100, gravity_vec = [0.0, 0.0, -9.81]) -> None:
         self.dt_ = dt_
-        self.model_ = "med7dock" #str(self.get_parameter("model").value)
-        path = os.path.join(get_package_share_directory("med7_dock_description"), "urdf", f"{self.model_}.urdf.xacro",)
+        self.model_ = "nero_description"
+        path = os.path.join(get_package_share_directory("nero_description"), "urdf", f"{self.model_}.urdf",)
         self.N = N_
         # 获取机器人模型
-        self.robot = optas.RobotModel(xacro_filename=path, time_derivs=[1],)
+        self.robot = optas.RobotModel(urdf_filename=path, time_derivs=[1])
         # 获取机器人关节参数
-        Nb, xyzs, rpys, axes = getJointParametersfromURDF(self.robot)
+        Nb, xyzs, rpys, axes = getJointParametersfromURDF(self.robot, ee_link="link7")
         # 计算机器人动力学模型
         self.dynamics_ = RNEA_function(Nb, 1, rpys, xyzs, axes, gravity_para = cs.DM(gravity_vec))
         # 通过动态线性化方法获取动力学回归矩阵和参数向量
         self.Ymat, self.PIvector = DynamicLinearlization(self.dynamics_, Nb)
         # 读取urdf
-        urdf_string_ = xacro.process(path)
+        urdf_string_ = pathlib.Path(path).read_text(encoding="utf-8")
         robot = urdf.URDF.from_xml_string(urdf_string_)
         # 获取每个连杆的质量
         masses = [link.inertial.mass for link in robot.links if link.inertial is not None]
-        self.masses_np = np.array(masses[1:])
+        # 为nero补充一个接近零质量的虚拟末端刚体(nero没有末端固定刚体)
+        self.masses_np = np.append(np.asarray(masses[1:], dtype=float), 1e-6)
         # print("masses = {0}".format(self.masses_np))
         # 获取每个连杆的质心向量
-        massesCenter = [link.inertial.origin.xyz for link in robot.links if link.inertial is not None]#+[[0.0,0.0,0.0]]
-        self.massesCenter_np = np.array(massesCenter[1:]).T
+        massesCenter = [link.inertial.origin.xyz for link in robot.links if link.inertial is not None]
+        self.massesCenter_np = np.column_stack((np.asarray(massesCenter[1:], dtype=float).T, np.zeros(3)))
         # 获取每个连杆的惯性参数
         Inertia = [link.inertial.inertia.to_matrix() for link in robot.links if link.inertial is not None]
-        self.Inertia_np = np.hstack(tuple(Inertia[1:]))
+        self.Inertia_np = np.hstack((*Inertia[1:], np.eye(3, dtype=float) * 1e-5))
         
     @ staticmethod
     def readCsvToList(path):
@@ -360,28 +361,25 @@ class Estimator():
         # 把待优化的物理参数转换成最小动力学参数
         estimate_cs = K @ self.PIvector(_estimate[0:_w0], _estimate[_w0:l1].reshape((_w1, _h1)), _estimate[l1:l2].reshape((_w2, _h2)))
         # 定义参数辨识的目标函数，包括力矩拟合误差平方和，物理参数正则化两部分，
-        obj = cs.sumsqr(taus1 - Y_r @ estimate_cs - Y_fri1 @ _estimate[-nj*2:])                                    # 实际力矩、减去估计力矩、减去摩擦力
-        + 10.0*cs.norm_2(_estimate[:_w0]) + 100.0*cs.norm_2(_estimate[_w0:l1]) + 100.0*cs.norm_2(_estimate[l1:l2]) # 参数正则化部分
+        obj = (cs.sumsqr(taus1 - Y_r @ estimate_cs - Y_fri1 @ _estimate[-nj*2:])                                    # 实际力矩、减去估计力矩、减去摩擦力
+        + 10.0*cs.norm_2(_estimate[:_w0]) + 100.0*cs.norm_2(_estimate[_w0:l1]) + 100.0*cs.norm_2(_estimate[l1:l2])) # 参数正则化部分
         # 为待辨识参数生成约束表达式、约束下界、约束上界
         ineq_constr, constraint_lb, constraint_ub = Estimator.build_ineq_physical_con(_estimate, _w0, _w1, _h1, _w2, _h2)
         # 优化问题: x 决策变量，f 要最小化的标量目标函数，g 约束表达式
         problem = {'x': _estimate, 'f': obj, 'g': cs.vertcat(*ineq_constr)}
         opts = {
             'ipopt': {
-                'max_iter': 5000,                  # 最大迭代次数
-                'tol': 1e-10,                      # 总体收敛容差
-                'constr_viol_tol': 1e-9,           # 约束违反容差
-                'compl_inf_tol': 1e-9,             # 互补性条件容差
-                'acceptable_tol': 1e-8,            # 可接受解容差
-                'acceptable_iter': 20,             # 迭代满当前次数后，如果满足可接受解容差，结束迭代
-                'linear_solver': 'mumps',          # 求解器
-                'mu_strategy': 'adaptive',         # 策略
-                'dual_inf_tol': 1e-10,             # 对偶可行性容忍度
-                'compl_inf_tol': 1e-10,            # 互补性容忍度
-                'bound_relax_factor': 0,           # 防止约束松弛
-                'hessian_approximation': 'exact',  # 使用精确的Hessian，不使用近似
+                'max_iter': 1000,                                # 最大迭代次数
+                'tol': 1e-6,                                     # 总体收敛容差
+                'acceptable_tol': 1e-4,                          # 可接受解容差
+                'acceptable_iter': 10,                           # 迭代满当前次数后，如果满足可接受解容差，结束迭代
+                'constr_viol_tol': 1e-5,                         # 约束违反容差
+                'linear_solver': 'mumps',                        # 求解器
+                'mu_strategy': 'adaptive',                       # 策略
+                'hessian_approximation': 'limited-memory',       # 使用精确的Hessian，不使用近似
+                "nlp_scaling_method": "gradient-based",
             },
-            'verbose': False,                      # 如果需要调试信息，可以设置为True
+            'verbose': False,                                    # 如果需要调试信息，可以设置为True
         }
         # 创建求解器: S 名称，ipopt 求解后端，problem 优化问题，opts 配置
         solver = cs.nlpsol('S', 'ipopt', problem, opts)
@@ -394,11 +392,13 @@ class Estimator():
         gt_x0 = Estimator.get_gt_params_sim(mass_norminal, mass_center_norminal, intertia_norminal, nj)
         import random
         # 初始化质量、质心、惯性参数、摩擦
-        init_x0 = (mass_norminal * np.random.uniform(0.0, 2.0, size = mass_norminal.shape)).tolist() 
-        + (mass_center_norminal * np.random.uniform(0.0, 2.0, size = mass_center_norminal.shape)).tolist()
-        + (intertia_norminal * np.random.uniform(0.0, 2.0, size = intertia_norminal.shape)).tolist()
-        + [random.random() * 1.0 for _ in range(nj)] 
-        + [random.random() * 1.0 for _ in range(nj)]
+        init_x0 = (
+            (mass_norminal * np.random.uniform(0.0, 2.0, size=mass_norminal.shape)).tolist()
+            + (mass_center_norminal * np.random.uniform(0.0, 2.0, size=mass_center_norminal.shape)).tolist()
+            + (intertia_norminal * np.random.uniform(0.0, 2.0, size=intertia_norminal.shape)).tolist()
+            + [random.random() * 1.0 for _ in range(nj)]
+            + [random.random() * 1.0 for _ in range(nj)]
+        )
         # 求解优化问题，要满足 lbg <= g(x) <= ubg 和 lbx <= x <= ubx
         sol = solver(x0 = init_x0, lbg = constraint_lb, ubg = constraint_ub)
         stats = solver.stats()
@@ -409,7 +409,7 @@ class Estimator():
     # 使用最小二乘法估计动力学参数
     def timer_cb_regressor(self, positions, velocities, efforts):
         # 获取动力学参数独立性矩阵
-        Pb, Pd, Kd = find_dyn_parm_deps(7,80,self.Ymat)
+        Pb, Pd, Kd = find_dyn_parm_deps(7, 80, self.Ymat)
         K = Pb.T +Kd @ Pd.T
         taus = []
         Y_ = []
@@ -569,11 +569,12 @@ class Estimator():
 
     # 将估计的参数保存到CSV文件中
     def saveEstimatedPara(self, parac)->None:
-        path1 = os.path.join(get_package_share_directory("gravity_compensation"), "test", "DynamicParameters.csv",)
+        path1 = pathlib.Path(__file__).resolve().parent / "test_data" / "DynamicParameters.csv"
+        path1.parent.mkdir(parents=True, exist_ok=True)
         para = parac.toarray().flatten()
         keys = ["para_{0}".format(idx) for idx in range(len(para))]
-        with open(path1,"w") as csv_file:
-            self.save_(csv_file,keys, [para])
+        with path1.open("w", newline="", encoding="utf-8") as csv_file:
+            self.save_(csv_file, keys, [para])
             
 # 使用butterworth滤波器对轨迹数据进行低通滤波
 def traj_filter(states):
@@ -607,11 +608,10 @@ def compare_traj(states1, states2):
 
 
 def main(args=None):
-    rclpy.init(args=args)
     # 获取机器人参数估计器
     paraEstimator = Estimator()
     # 获取数据
-    path_pos = os.path.join(get_package_share_directory("gravity_compensation"), "test", "robot_data copy 2.csv", )
+    path_pos = pathlib.Path(__file__).resolve().parent / "test_data" / "mujoco_robot_data.csv"
     # 从CSV文件中提取位置、速度和努力数据
     positions, velocities, efforts = paraEstimator.ExtractFromMeasurmentCsv(path_pos)
     velocities = traj_filter(velocities)
@@ -626,17 +626,15 @@ def main(args=None):
     # 比较轨迹，绘制估计的外部力和实际的外部力
     compare_traj(tau_exts, efforts_f)
 
-    path_pos_2 = os.path.join(get_package_share_directory("gravity_compensation"), "test", "measurements_0dgr.csv", )
-    # 从CSV文件中提取位置、速度和努力数据
-    positions_, velocities_, efforts_ = paraEstimator.ExtractFromMeasurmentCsv(path_pos_2)
-    velocities_=traj_filter(velocities_)
-    efforts_f_=traj_filter(efforts_)
-    # 进行测试，使用估计的参数进行控制
-    tau_exts_, es =paraEstimator.testWithEstimatedParaCon(positions_, velocities_, efforts_f_,estimate_pam)
-    # 比较轨迹，绘制估计的外部力和实际的外部力
-    compare_traj(tau_exts_, efforts_f_)
-
-    rclpy.shutdown()
+    # path_pos_2 = os.path.join(get_package_share_directory("gravity_compensation"), "test", "measurements_0dgr.csv", )
+    # # 从CSV文件中提取位置、速度和努力数据
+    # positions_, velocities_, efforts_ = paraEstimator.ExtractFromMeasurmentCsv(path_pos_2)
+    # velocities_=traj_filter(velocities_)
+    # efforts_f_=traj_filter(efforts_)
+    # # 进行测试，使用估计的参数进行控制
+    # tau_exts_, es =paraEstimator.testWithEstimatedParaCon(positions_, velocities_, efforts_f_,estimate_pam)
+    # # 比较轨迹，绘制估计的外部力和实际的外部力
+    # compare_traj(tau_exts_, efforts_f_)
 
 if __name__ == "__main__":
     main()
